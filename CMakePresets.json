@@ -1,0 +1,29 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 4,
+        "minor": 2,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "msvc-x64",
+            "displayName": "MSVC x64",
+            "generator": "Visual Studio 18 2026",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/build"
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "debug",
+            "configurePreset": "msvc-x64",
+            "configuration": "Debug"
+        },
+        {
+            "name": "release",
+            "configurePreset": "msvc-x64",
+            "configuration": "Release"
+        }
+    ]
+}

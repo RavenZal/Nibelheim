@@ -1,0 +1,45 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: Configure",
+            "type": "shell",
+            "command": "C:/Program Files/CMake4.4.0/bin/cmake.exe",
+            "args": [
+                "--preset", "msvc-x64"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "Run CMake configure with msvc-x64 preset"
+        },
+        {
+            "label": "CMake: Build (Debug)",
+            "type": "shell",
+            "command": "C:/Program Files/CMake4.4.0/bin/cmake.exe",
+            "args": [
+                "--build", "build",
+                "--config", "Debug"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$msCompile",
+            "dependsOn": ["CMake: Configure"],
+            "detail": "Build project in Debug configuration"
+        },
+        {
+            "label": "CMake: Build (Release)",
+            "type": "shell",
+            "command": "C:/Program Files/CMake4.4.0/bin/cmake.exe",
+            "args": [
+                "--build", "build",
+                "--config", "Release"
+            ],
+            "group": "build",
+            "problemMatcher": "$msCompile",
+            "dependsOn": ["CMake: Configure"],
+            "detail": "Build project in Release configuration"
+        }
+    ]
+}
