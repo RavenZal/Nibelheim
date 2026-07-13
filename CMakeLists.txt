@@ -6,6 +6,7 @@ project(Dx12Renderer
 )
 
 add_executable(DX12EnvironmentCheck
+    src/HResult.h
     src/main.cpp
 )
 
