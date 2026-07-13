@@ -1,5 +1,8 @@
 {
     "cmake.cmakePath": "C:/Program Files/CMake4.4.0/bin/cmake.exe",
-    "cmake.generator": "Visual Studio 18 2026",
-    "cmake.buildDirectory": "${workspaceFolder}/build"
+    "cmake.useCMakePresets": "always",
+    "cmake.configureOnOpen": true,
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "C_Cpp.default.intelliSenseMode": "windows-msvc-x64",
+    "C_Cpp.default.cppStandard": "c++20"
 }

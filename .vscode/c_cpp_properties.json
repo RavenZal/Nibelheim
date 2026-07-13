@@ -1,0 +1,13 @@
+{
+    "configurations": [
+        {
+            "name": "MSVC x64",
+            "configurationProvider": "ms-vscode.cmake-tools",
+            "compilerPath": "D:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe",
+            "intelliSenseMode": "windows-msvc-x64",
+            "cStandard": "c17",
+            "cppStandard": "c++20"
+        }
+    ],
+    "version": 4
+}
