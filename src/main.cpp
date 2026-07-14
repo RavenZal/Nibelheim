@@ -242,6 +242,63 @@ int main()
         );
         std::cout << "ID3D12CommandQueue Create Success" << "\n";
 
+        //swap Chain
+        RECT clientRect;
+        if(!GetClientRect(window, &clientRect))
+        {
+            const DWORD error = GetLastError();
+
+            dx12::ThrowIfFailed(
+                HRESULT_FROM_WIN32(error),
+                "GetClientRect"
+            );
+        }
+        
+        int Width = clientRect.right - clientRect.left;
+        int Height = clientRect.bottom - clientRect.top;
+
+        if(Width <= 0 || Height <=0)
+        {
+            throw std::runtime_error(
+                "The window client area must have a positive width and height."
+            );  
+        }
+        
+        DXGI_SWAP_CHAIN_DESC1 chainDesc1{};
+        chainDesc1.Width = Width;
+        chainDesc1.Height = Height;
+        chainDesc1.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        chainDesc1.Stereo = FALSE;
+        chainDesc1.SampleDesc.Count = 1;
+        chainDesc1.SampleDesc.Quality = 0;
+        chainDesc1.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        chainDesc1.BufferCount = 2;
+        chainDesc1.Scaling = DXGI_SCALING_STRETCH;
+        chainDesc1.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        chainDesc1.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+        chainDesc1.Flags = 0;
+        
+        Microsoft::WRL::ComPtr<IDXGISwapChain1> _IDXGISwapChain1;
+        dx12::ThrowIfFailed(
+            factory->CreateSwapChainForHwnd(
+                CommandQueue.Get(),
+                window,
+                &chainDesc1,
+                nullptr,
+                nullptr,
+                _IDXGISwapChain1.GetAddressOf()
+            ),
+            "CreateSwapChainForHwnd"
+        );       
+        
+        Microsoft::WRL::ComPtr<IDXGISwapChain3> _IDXGISwapChain3;
+        dx12::ThrowIfFailed(
+            _IDXGISwapChain1.As(&_IDXGISwapChain3),
+            "Find IDXGISwapChain3"
+        );
+        std::cout << "IDXGISwapChain3 Create Success" << "\n";
+        
+        
         //Command Allocator
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> CommandAllocator;
         dx12::ThrowIfFailed(
@@ -334,7 +391,7 @@ int main()
                 fence.Get(),
                 fenceValue
             ),
-            "ID3D12CommandQueue::Signal"
+            "ID3D12CommandQueue::Signal" //signal: let fence inner value = fenceValue
         );
 
         const UINT64 completedValue = fence->GetCompletedValue();
@@ -353,13 +410,13 @@ int main()
                     fenceValue,
                     fenceEvent.get()
                 ),
-                "ID3D12Fence::SetEventOnCompletion"
+                "ID3D12Fence::SetEventOnCompletion" //reach fenceValue then emit this event
             );
 
             const DWORD waitResult = WaitForSingleObject(
                 fenceEvent.get(),
                 INFINITE
-            );
+            ); //block this
 
             if (waitResult == WAIT_FAILED)
             {
