@@ -381,17 +381,6 @@ int main()
 
         std::cout << "GPU command submission completed successfully.\n";
 
-
-
-
-
-
-
-
-
-
-
-
         //ShowWindow             
         ShowWindow(window, SW_SHOW);
         if(UpdateWindow(window) == FALSE)
