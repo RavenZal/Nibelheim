@@ -185,6 +185,29 @@ int main()
         std::cout << "Direct3D 12 device created successfully "
                      "(minimum feature level 11_0).\n";
 
+        //Device Queue of Command
+        D3D12_COMMAND_QUEUE_DESC commandQueueDescription{};
+        commandQueueDescription.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        commandQueueDescription.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        commandQueueDescription.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+        commandQueueDescription.NodeMask = 0;
+        
+        Microsoft::WRL::ComPtr<ID3D12CommandQueue> CommandQueue;
+        dx12::ThrowIfFailed(
+            device->CreateCommandQueue(
+                &commandQueueDescription,
+                IID_PPV_ARGS(CommandQueue.GetAddressOf())
+            ),"CreateCommandQueue"
+        );
+
+        dx12::ThrowIfFailed(
+            CommandQueue->SetName(L"Main Graphics Command Queue"),
+            "ID3D12CommandQueue::SetName"
+        );
+        std::cout << "ID3D12CommandQueue Create Success" << "\n";
+
+
+        //ShowWindow             
         ShowWindow(window, SW_SHOW);
         if(UpdateWindow(window) == FALSE)
         {
