@@ -4,6 +4,8 @@
 #include <wrl/client.h>
 #include <Windows.h>
 #include <stdexcept>
+#include <dxgi.h>
+#include <dxgi1_4.h>
 
 #include <cstdlib>
 #include <exception>
@@ -101,7 +103,73 @@ int main()
             dx12::ThrowIfFailed(result, "CreateWindowExW");
         }
 
+        //DXGI
+        UINT dxgiFactoryFlags = 0;
+#if defined(_DEBUG)
+        dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+#endif
+        
+        Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+        dx12::ThrowIfFailed(
+            CreateDXGIFactory2(
+                dxgiFactoryFlags, 
+                IID_PPV_ARGS(&factory)),
+                "CreateDXGIFactory2"
+        );
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
 
+        for (UINT adapterIndex = 0;;adapterIndex++)
+        {
+            Microsoft::WRL::ComPtr<IDXGIAdapter1> currentAdapter;
+            HRESULT hr = factory->EnumAdapters1(
+                adapterIndex,
+                &currentAdapter
+            );
+
+            if (hr == DXGI_ERROR_NOT_FOUND)
+            {
+                break;
+            }
+
+            dx12::ThrowIfFailed(
+                hr,
+                "IDXGIFactory4::EnumAdapters1"
+            );
+
+            //no failure
+            DXGI_ADAPTER_DESC1 desc{};
+            dx12::ThrowIfFailed(
+                currentAdapter->GetDesc1(&desc),
+                "IDXGIAdapter1::GetDesc1"
+            );
+            
+            if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0)
+            {
+                continue; //find next one
+            }
+            
+            HRESULT deviceCheck = D3D12CreateDevice(
+                currentAdapter.Get(),
+                D3D_FEATURE_LEVEL_11_0,
+                __uuidof(ID3D12Device),
+                nullptr
+            );
+
+            if (SUCCEEDED(deviceCheck))
+            {
+                adapter = currentAdapter;
+                std::wcout << L"Selected adapter: " << desc.Description << L'\n';
+                break;
+            }
+        }
+        
+        if (adapter == nullptr)
+        {
+            throw std::runtime_error(
+                "No suitable hardware adapter supporting Direct3D 12 was found."
+            );
+        }
+                
         //Device
         Microsoft::WRL::ComPtr<ID3D12Device> device;
         constexpr D3D_FEATURE_LEVEL minimumFeatureLevel =
@@ -109,7 +177,7 @@ int main()
 
         dx12::ThrowIfFailed(
             D3D12CreateDevice(
-                nullptr,
+                adapter.Get(),
                 minimumFeatureLevel,
                 IID_PPV_ARGS(device.GetAddressOf())),
             "D3D12CreateDevice");
