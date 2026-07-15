@@ -375,19 +375,41 @@ int main()
 
 
         //Command Allocator
-        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> CommandAllocator;
-        dx12::ThrowIfFailed(
-            device->CreateCommandAllocator(
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                IID_PPV_ARGS(CommandAllocator.GetAddressOf())
-            ),"CreateCommandAllocator"
-        );
+        // One command allocator for each swap-chain back buffer.
+        std::array<
+            Microsoft::WRL::ComPtr<ID3D12CommandAllocator>,
+            swapChainBufferCount
+        > commandAllocators;
 
-        dx12::ThrowIfFailed(
-            CommandAllocator->SetName(L"Main Graphics Command Allocator"),
-            "ID3D12CommandAllocator::SetName"
-        );
-        std::cout << "ID3D12CommandAllocator Create Success" << "\n";
+        constexpr const wchar_t*
+            commandAllocatorNames[swapChainBufferCount] = {
+                L"Frame Command Allocator 0",
+                L"Frame Command Allocator 1"
+            };
+
+        for (UINT frameIndex = 0;
+            frameIndex < swapChainBufferCount;
+            ++frameIndex)
+        {
+            dx12::ThrowIfFailed(
+                device->CreateCommandAllocator(
+                    D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    IID_PPV_ARGS(
+                        commandAllocators[frameIndex].GetAddressOf()
+                    )
+                ),
+                "ID3D12Device::CreateCommandAllocator"
+            );
+
+            dx12::ThrowIfFailed(
+                commandAllocators[frameIndex]->SetName(
+                    commandAllocatorNames[frameIndex]
+                ),
+                "ID3D12CommandAllocator::SetName"
+            );
+        }
+
+        std::cout << "Frame command allocators created successfully.\n";
 
         //Command List
         Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> CommandList;
@@ -395,7 +417,7 @@ int main()
             device->CreateCommandList(
                 0,
                 D3D12_COMMAND_LIST_TYPE_DIRECT,
-                CommandAllocator.Get(),
+                commandAllocators[0].Get(),
                 nullptr,
                 IID_PPV_ARGS(CommandList.GetAddressOf())
             ),"CreateCommandList"
@@ -405,85 +427,14 @@ int main()
             CommandList->SetName(L"Main Graphics Command List"),
             "ID3D12GraphicsCommandList::SetName"
         );
-        std::cout << "ID3D12GraphicsCommandList Create Success" << "\n";
-
-        //BACKBUFFER AND RTV
-
-        const UINT currentBackBufferIndex =
-        _IDXGISwapChain3->GetCurrentBackBufferIndex();
-        if (currentBackBufferIndex >= swapChainBufferCount)
-        {
-            throw std::runtime_error(
-                "Swap-chain back-buffer index is out of range."
-            );
-        }
-
-        D3D12_CPU_DESCRIPTOR_HANDLE currentBackBufferRtv =
-        rtvHeapStart;
-
-        currentBackBufferRtv.ptr +=
-        static_cast<SIZE_T>(currentBackBufferIndex) *
-        static_cast<SIZE_T>(rtvDescriptorSize);
-            //Barrier
-        D3D12_RESOURCE_BARRIER toRenderTargetBarrier{};
-        toRenderTargetBarrier.Type =
-            D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        toRenderTargetBarrier.Flags =
-            D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        toRenderTargetBarrier.Transition.pResource =
-            backBuffers[currentBackBufferIndex].Get();
-        toRenderTargetBarrier.Transition.Subresource =
-            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        toRenderTargetBarrier.Transition.StateBefore =
-            D3D12_RESOURCE_STATE_PRESENT;
-        toRenderTargetBarrier.Transition.StateAfter =
-            D3D12_RESOURCE_STATE_RENDER_TARGET;       
-        
-        CommandList->ResourceBarrier(
-            1,
-            &toRenderTargetBarrier
-        );
-        
-        constexpr FLOAT clearColor[4] = {
-            0.1F,
-            0.2F,
-            0.4F,
-            1.0F
-        };
-        
-        CommandList->ClearRenderTargetView(
-            currentBackBufferRtv,
-            clearColor,
-            0,
-            nullptr
-        );
-        
-        D3D12_RESOURCE_BARRIER toPresentBarrier{};
-        toPresentBarrier.Type =
-            D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        toPresentBarrier.Flags =
-            D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        toPresentBarrier.Transition.pResource =
-            backBuffers[currentBackBufferIndex].Get();
-        toPresentBarrier.Transition.Subresource =
-            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        toPresentBarrier.Transition.StateBefore =
-            D3D12_RESOURCE_STATE_RENDER_TARGET;
-        toPresentBarrier.Transition.StateAfter =
-            D3D12_RESOURCE_STATE_PRESENT;
-        
-        CommandList->ResourceBarrier(
-        1,
-        &toPresentBarrier
-        );
-        
-        
-        
         dx12::ThrowIfFailed(
-            CommandList->Close(),
-            "ID3D12GraphicsCommandList::Close"
+        CommandList->Close(),
+        "Initial ID3D12GraphicsCommandList::Close"
         );
-        std::cout << "ID3D12GraphicsCommandList Close Success" << "\n";
+
+        std::cout << "ID3D12GraphicsCommandList Create and Close initially Success" << "\n";
+
+        
 
         //Fence
         Microsoft::WRL::ComPtr<ID3D12Fence> fence;
@@ -503,7 +454,8 @@ int main()
 
         //Event
         
-        constexpr UINT64 fenceValue = 1;
+        std::array<UINT64, swapChainBufferCount> frameFenceValues{};
+        UINT64 nextFenceValue = 1;
 
         ScopedEventHandle fenceEvent{
             CreateEventW(
@@ -524,10 +476,6 @@ int main()
             );
         }
 
-        ID3D12CommandList* const commandLists[] = {
-            CommandList.Get()
-        };
-
         //window
         //ShowWindow             
         ShowWindow(window, SW_SHOW);
@@ -538,89 +486,290 @@ int main()
             dx12::ThrowIfFailed(result, "UpdateWindow");            
         }
 
-
-        CommandQueue->ExecuteCommandLists(
-            1,
-            commandLists
-        );
-
-        dx12::ThrowIfFailed(
-            _IDXGISwapChain3->Present(
-                1,
-                0
-            ),
-            "IDXGISwapChain3::Present"
-        );
-
-        dx12::ThrowIfFailed(
-            CommandQueue->Signal(
-                fence.Get(),
-                fenceValue
-            ),
-            "ID3D12CommandQueue::Signal" //signal: let fence inner value = fenceValue
-        );
-
-        const UINT64 completedValue = fence->GetCompletedValue();
-
-        if (completedValue == UINT64_MAX)
-        {
-            throw std::runtime_error(
-                "ID3D12Fence::GetCompletedValue indicates device removal."
-            );
-        }
-
-        if (completedValue < fenceValue)
-        {
-            dx12::ThrowIfFailed(
-                fence->SetEventOnCompletion(
-                    fenceValue,
-                    fenceEvent.get()
-                ),
-                "ID3D12Fence::SetEventOnCompletion" //reach fenceValue then emit this event
-            );
-
-            const DWORD waitResult = WaitForSingleObject(
-                fenceEvent.get(),
-                INFINITE
-            ); //block this
-
-            if (waitResult == WAIT_FAILED)
-            {
-                const DWORD error = GetLastError();
-
-                dx12::ThrowIfFailed(
-                    HRESULT_FROM_WIN32(error),
-                    "WaitForSingleObject"
-                );
-            }
-
-            if (waitResult != WAIT_OBJECT_0)
-            {
-                throw std::runtime_error(
-                    "WaitForSingleObject returned an unexpected result."
-                );
-            }
-        }
-
-        std::cout << "GPU command submission completed successfully.\n";
-        
-        //msg
         MSG message{};
-        int result;
-        while ((result = GetMessageW(&message, nullptr, 0, 0)) != 0)
-        {   
-            if(result == -1)
+        bool isRunning = true;
+        
+        // ================================== //
+        //          MAIN ROUND
+        // ================================== //
+        
+        while (isRunning)
+        {
+            // Process every message currently waiting in the queue.
+            while (PeekMessageW(
+                &message,
+                nullptr,
+                0,
+                0,
+                PM_REMOVE))
             {
-                //report failure
-                const DWORD error = GetLastError();
-                const HRESULT errorResult = HRESULT_FROM_WIN32(error);
-                dx12::ThrowIfFailed(errorResult, "window");
+                if (message.message == WM_QUIT)
+                {
+                    isRunning = false;
+                    break;
+                }
+
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+
+            // Do not submit another frame after WM_QUIT.
+            if (!isRunning)
+            {
                 break;
             }
-        TranslateMessage(&message);
-        DispatchMessageW(&message);           
-        }
 
+            // Query this every frame. Do not assume buffer 0 and buffer 1
+            // alternate in a way controlled directly by the application.
+            const UINT currentBackBufferIndex =
+                _IDXGISwapChain3->GetCurrentBackBufferIndex();
+
+            if (currentBackBufferIndex >= swapChainBufferCount)
+            {
+                throw std::runtime_error(
+                    "Swap-chain back-buffer index is out of range."
+                );
+            }
+
+            // This is the Fence milestone associated with the previous use
+            // of the current back buffer and its command allocator.
+            const UINT64 frameFenceValue =
+                frameFenceValues[currentBackBufferIndex];
+
+            // A value of zero means this frame resource has never been submitted.
+            if (frameFenceValue != 0)
+            {
+                const UINT64 completedValue =
+                    fence->GetCompletedValue();
+
+                if (completedValue == UINT64_MAX)
+                {
+                    throw std::runtime_error(
+                        "ID3D12Fence::GetCompletedValue indicates "
+                        "device removal."
+                    );
+                }
+
+                // completedValue is what the GPU has finished.
+                // frameFenceValue is what this frame resource needs.
+                if (completedValue < frameFenceValue)
+                {
+                    dx12::ThrowIfFailed(
+                        fence->SetEventOnCompletion(
+                            frameFenceValue,
+                            fenceEvent.get()
+                        ),
+                        "ID3D12Fence::SetEventOnCompletion"
+                    );
+
+                    const DWORD waitResult =
+                        WaitForSingleObject(
+                            fenceEvent.get(),
+                            INFINITE
+                        );
+
+                    if (waitResult == WAIT_FAILED)
+                    {
+                        const DWORD error = GetLastError();
+
+                        dx12::ThrowIfFailed(
+                            HRESULT_FROM_WIN32(error),
+                            "WaitForSingleObject"
+                        );
+                    }
+
+                    if (waitResult != WAIT_OBJECT_0)
+                    {
+                        throw std::runtime_error(
+                            "WaitForSingleObject returned "
+                            "an unexpected result."
+                        );
+                    }
+                }
+            }
+
+            // The GPU has finished the previous commands stored in this
+            // allocator, so its command memory can now be reused.
+            dx12::ThrowIfFailed(
+                commandAllocators[currentBackBufferIndex]->Reset(),
+                "ID3D12CommandAllocator::Reset"
+            );
+
+            // Reset changes the closed command list back into recording state
+            // and associates it with the current frame's allocator.
+            dx12::ThrowIfFailed(
+                CommandList->Reset(
+                    commandAllocators[currentBackBufferIndex].Get(),
+                    nullptr
+                ),
+                "ID3D12GraphicsCommandList::Reset"
+            );
+
+            // Select the RTV that belongs to the current swap-chain buffer.
+            D3D12_CPU_DESCRIPTOR_HANDLE currentBackBufferRtv =
+                rtvHeapStart;
+
+            currentBackBufferRtv.ptr +=
+                static_cast<SIZE_T>(currentBackBufferIndex) *
+                static_cast<SIZE_T>(rtvDescriptorSize);
+
+            // The swap-chain buffer begins the frame in PRESENT state.
+            D3D12_RESOURCE_BARRIER toRenderTargetBarrier{};
+            toRenderTargetBarrier.Type =
+                D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            toRenderTargetBarrier.Flags =
+                D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            toRenderTargetBarrier.Transition.pResource =
+                backBuffers[currentBackBufferIndex].Get();
+            toRenderTargetBarrier.Transition.Subresource =
+                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            toRenderTargetBarrier.Transition.StateBefore =
+                D3D12_RESOURCE_STATE_PRESENT;
+            toRenderTargetBarrier.Transition.StateAfter =
+                D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+            CommandList->ResourceBarrier(
+                1,
+                &toRenderTargetBarrier
+            );
+
+            constexpr FLOAT clearColor[4] = {
+                0.1F,
+                0.2F,
+                0.4F,
+                1.0F
+            };
+
+            CommandList->ClearRenderTargetView(
+                currentBackBufferRtv,
+                clearColor,
+                0,
+                nullptr
+            );
+
+            // Present requires the swap-chain buffer to be back in PRESENT state.
+            D3D12_RESOURCE_BARRIER toPresentBarrier{};
+            toPresentBarrier.Type =
+                D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            toPresentBarrier.Flags =
+                D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            toPresentBarrier.Transition.pResource =
+                backBuffers[currentBackBufferIndex].Get();
+            toPresentBarrier.Transition.Subresource =
+                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            toPresentBarrier.Transition.StateBefore =
+                D3D12_RESOURCE_STATE_RENDER_TARGET;
+            toPresentBarrier.Transition.StateAfter =
+                D3D12_RESOURCE_STATE_PRESENT;
+
+            CommandList->ResourceBarrier(
+                1,
+                &toPresentBarrier
+            );
+
+            dx12::ThrowIfFailed(
+                CommandList->Close(),
+                "ID3D12GraphicsCommandList::Close"
+            );
+
+            ID3D12CommandList* const commandLists[] = {
+                CommandList.Get()
+            };
+
+            // ExecuteCommandLists returns void. Incorrect command recording is
+            // primarily detected through the Direct3D 12 Debug Layer.
+            CommandQueue->ExecuteCommandLists(
+                1,
+                commandLists
+            );
+
+            dx12::ThrowIfFailed(
+                _IDXGISwapChain3->Present(
+                    1,
+                    0
+                ),
+                "IDXGISwapChain3::Present"
+            );
+
+            // UINT64_MAX is reserved here as the device-removal result
+            // from GetCompletedValue, so do not submit it as a normal value.
+            if (nextFenceValue == UINT64_MAX)
+            {
+                throw std::runtime_error(
+                    "Fence value space has been exhausted."
+                );
+            }
+
+            const UINT64 submittedFenceValue =
+                nextFenceValue;
+
+            dx12::ThrowIfFailed(
+                CommandQueue->Signal(
+                    fence.Get(),
+                    submittedFenceValue
+                ),
+                "ID3D12CommandQueue::Signal"
+            );
+
+            // Record which GPU milestone must complete before this exact
+            // back buffer and allocator pair can be reused.
+            frameFenceValues[currentBackBufferIndex] =
+                submittedFenceValue;
+
+            ++nextFenceValue;
+        }
+      
+        const UINT64 lastSubmittedFenceValue =
+            nextFenceValue - 1;
+
+        if (lastSubmittedFenceValue != 0)
+        {
+            const UINT64 completedValue =
+                fence->GetCompletedValue();
+
+            if (completedValue == UINT64_MAX)
+            {
+                throw std::runtime_error(
+                    "ID3D12Fence::GetCompletedValue indicates "
+                    "device removal during shutdown."
+                );
+            }
+
+            if (completedValue < lastSubmittedFenceValue)
+            {
+                dx12::ThrowIfFailed(
+                    fence->SetEventOnCompletion(
+                        lastSubmittedFenceValue,
+                        fenceEvent.get()
+                    ),
+                    "Shutdown ID3D12Fence::SetEventOnCompletion"
+                );
+
+                const DWORD waitResult =
+                    WaitForSingleObject(
+                        fenceEvent.get(),
+                        INFINITE
+                    );
+
+                if (waitResult == WAIT_FAILED)
+                {
+                    const DWORD error = GetLastError();
+
+                    dx12::ThrowIfFailed(
+                        HRESULT_FROM_WIN32(error),
+                        "Shutdown WaitForSingleObject"
+                    );
+                }
+
+                if (waitResult != WAIT_OBJECT_0)
+                {
+                    throw std::runtime_error(
+                        "Shutdown WaitForSingleObject returned "
+                        "an unexpected result."
+                    );
+                }
+            }
+        }
 
 #if defined(_DEBUG)
         Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
