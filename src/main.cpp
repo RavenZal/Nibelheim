@@ -323,9 +323,14 @@ int main()
             "desHeap::SetName"
         );
 
-        UINT rtvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-        D3D12_CPU_DESCRIPTOR_HANDLE currentRtvHandle =
+        const UINT rtvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtvHeapStart =
             desHeap->GetCPUDescriptorHandleForHeapStart();
+        
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvCreationHandle =
+            rtvHeapStart;
+        
         std::array<
             Microsoft::WRL::ComPtr<ID3D12Resource>,
             swapChainBufferCount
@@ -360,10 +365,10 @@ int main()
             device->CreateRenderTargetView(
                 backBuffers[bufferIndex].Get(),
                 nullptr,
-                currentRtvHandle
+                rtvCreationHandle
             );
 
-            currentRtvHandle.ptr +=
+            rtvCreationHandle.ptr +=
                 static_cast<SIZE_T>(rtvDescriptorSize);
         }
         std::cout << "RTV Create Success" << "\n";
@@ -402,6 +407,78 @@ int main()
         );
         std::cout << "ID3D12GraphicsCommandList Create Success" << "\n";
 
+        //BACKBUFFER AND RTV
+
+        const UINT currentBackBufferIndex =
+        _IDXGISwapChain3->GetCurrentBackBufferIndex();
+        if (currentBackBufferIndex >= swapChainBufferCount)
+        {
+            throw std::runtime_error(
+                "Swap-chain back-buffer index is out of range."
+            );
+        }
+
+        D3D12_CPU_DESCRIPTOR_HANDLE currentBackBufferRtv =
+        rtvHeapStart;
+
+        currentBackBufferRtv.ptr +=
+        static_cast<SIZE_T>(currentBackBufferIndex) *
+        static_cast<SIZE_T>(rtvDescriptorSize);
+            //Barrier
+        D3D12_RESOURCE_BARRIER toRenderTargetBarrier{};
+        toRenderTargetBarrier.Type =
+            D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toRenderTargetBarrier.Flags =
+            D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        toRenderTargetBarrier.Transition.pResource =
+            backBuffers[currentBackBufferIndex].Get();
+        toRenderTargetBarrier.Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        toRenderTargetBarrier.Transition.StateBefore =
+            D3D12_RESOURCE_STATE_PRESENT;
+        toRenderTargetBarrier.Transition.StateAfter =
+            D3D12_RESOURCE_STATE_RENDER_TARGET;       
+        
+        CommandList->ResourceBarrier(
+            1,
+            &toRenderTargetBarrier
+        );
+        
+        constexpr FLOAT clearColor[4] = {
+            0.1F,
+            0.2F,
+            0.4F,
+            1.0F
+        };
+        
+        CommandList->ClearRenderTargetView(
+            currentBackBufferRtv,
+            clearColor,
+            0,
+            nullptr
+        );
+        
+        D3D12_RESOURCE_BARRIER toPresentBarrier{};
+        toPresentBarrier.Type =
+            D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toPresentBarrier.Flags =
+            D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        toPresentBarrier.Transition.pResource =
+            backBuffers[currentBackBufferIndex].Get();
+        toPresentBarrier.Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        toPresentBarrier.Transition.StateBefore =
+            D3D12_RESOURCE_STATE_RENDER_TARGET;
+        toPresentBarrier.Transition.StateAfter =
+            D3D12_RESOURCE_STATE_PRESENT;
+        
+        CommandList->ResourceBarrier(
+        1,
+        &toPresentBarrier
+        );
+        
+        
+        
         dx12::ThrowIfFailed(
             CommandList->Close(),
             "ID3D12GraphicsCommandList::Close"
@@ -451,9 +528,28 @@ int main()
             CommandList.Get()
         };
 
+        //window
+        //ShowWindow             
+        ShowWindow(window, SW_SHOW);
+        if(UpdateWindow(window) == FALSE)
+        {
+            const DWORD error = GetLastError();
+            const HRESULT result = HRESULT_FROM_WIN32(error);
+            dx12::ThrowIfFailed(result, "UpdateWindow");            
+        }
+
+
         CommandQueue->ExecuteCommandLists(
             1,
             commandLists
+        );
+
+        dx12::ThrowIfFailed(
+            _IDXGISwapChain3->Present(
+                1,
+                0
+            ),
+            "IDXGISwapChain3::Present"
         );
 
         dx12::ThrowIfFailed(
@@ -507,15 +603,6 @@ int main()
         }
 
         std::cout << "GPU command submission completed successfully.\n";
-
-        //ShowWindow             
-        ShowWindow(window, SW_SHOW);
-        if(UpdateWindow(window) == FALSE)
-        {
-            const DWORD error = GetLastError();
-            const HRESULT result = HRESULT_FROM_WIN32(error);
-            dx12::ThrowIfFailed(result, "UpdateWindow");            
-        }
         
         //msg
         MSG message{};
