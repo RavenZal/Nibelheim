@@ -15,6 +15,15 @@
 
 namespace
 {
+
+struct WindowState final
+{
+    bool resizePending = false;
+    bool isMinimized = false;
+    UINT pendingWidth = 0;
+    UINT pendingHeight = 0;
+};
+
 class ScopedEventHandle final
 {
 public:
@@ -54,27 +63,128 @@ LRESULT CALLBACK WindowProcedure(
     UINT message,
     WPARAM wParam,
     LPARAM lParam)
+{
+    switch (message)
     {
-        switch (message)
+    case WM_NCCREATE:
+    {
+        auto* creationData =
+            reinterpret_cast<CREATESTRUCTW*>(lParam);
+
+        auto* windowState =
+            static_cast<WindowState*>(
+                creationData->lpCreateParams
+            );
+
+        if (windowState == nullptr)
         {
-        case WM_CLOSE:
+            return FALSE;
+        }
+
+        SetLastError(ERROR_SUCCESS);
+
+        const LONG_PTR previousValue =
+            SetWindowLongPtrW(
+                window,
+                GWLP_USERDATA,
+                reinterpret_cast<LONG_PTR>(windowState)
+            );
+
+        const DWORD error = GetLastError();
+
+        if (previousValue == 0 &&
+            error != ERROR_SUCCESS)
+        {
+            std::cerr
+                << "SetWindowLongPtrW failed: "
+                << dx12::FormatHResult(
+                    HRESULT_FROM_WIN32(error)
+                )
+                << '\n';
+
+            return FALSE;
+        }
+
+        return TRUE;
+    }
+
+    case WM_SIZE:
+    {
+        auto* windowState =
+            reinterpret_cast<WindowState*>(
+                GetWindowLongPtrW(
+                    window,
+                    GWLP_USERDATA
+                )
+            );
+
+        if (windowState == nullptr)
+        {
+            return DefWindowProcW(
+                window,
+                message,
+                wParam,
+                lParam
+            );
+        }
+
+        const UINT newWidth =
+            static_cast<UINT>(LOWORD(lParam));
+
+        const UINT newHeight =
+            static_cast<UINT>(HIWORD(lParam));
+
+        if (wParam == SIZE_MINIMIZED ||
+            newWidth == 0 ||
+            newHeight == 0)
+        {
+            windowState->isMinimized = true;
+            windowState->resizePending = false;
+            return 0;
+        }
+
+        windowState->isMinimized = false;
+        windowState->pendingWidth = newWidth;
+        windowState->pendingHeight = newHeight;
+        windowState->resizePending = true;
+
+        return 0;
+    }
+
+    case WM_CLOSE:
         if (DestroyWindow(window) == FALSE)
         {
             const DWORD error = GetLastError();
-            std::string errorString = dx12::FormatHResult(HRESULT_FROM_WIN32(error));
-            std::cout << "DestroyWindow failed:" << error << errorString << "\n";
+
+            const std::string errorString =
+                dx12::FormatHResult(
+                    HRESULT_FROM_WIN32(error)
+                );
+
+            std::cout
+                << "DestroyWindow failed: "
+                << error
+                << errorString
+                << '\n';
+
             PostQuitMessage(EXIT_FAILURE);
         }
-            return 0;
-        
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
 
-        default:
-            return DefWindowProcW(window, message, wParam, lParam);
-        }
+        return 0;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+
+    default:
+        return DefWindowProcW(
+            window,
+            message,
+            wParam,
+            lParam
+        );
     }
+}
 
 int main()
 {
@@ -121,6 +231,8 @@ int main()
             dx12::ThrowIfFailed(result, "RegisterClassExW");
         }
 
+        WindowState windowState{};
+
         HWND window =CreateWindowExW(
             0,
             windowClassName,
@@ -133,7 +245,8 @@ int main()
             nullptr,
             nullptr,
             instance,
-            nullptr);  
+            &windowState);  
+        
         if (window == nullptr)
         {
             const DWORD error = GetLastError();
@@ -266,11 +379,17 @@ int main()
             );  
         }
         
+        UINT swapChainWidth =
+            static_cast<UINT>(Width);
+
+        UINT swapChainHeight =
+            static_cast<UINT>(Height);
+
         constexpr UINT swapChainBufferCount = 2;
 
         DXGI_SWAP_CHAIN_DESC1 chainDesc1{};
-        chainDesc1.Width = Width;
-        chainDesc1.Height = Height;
+        chainDesc1.Width = swapChainWidth;
+        chainDesc1.Height = swapChainHeight;
         chainDesc1.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         chainDesc1.Stereo = FALSE;
         chainDesc1.SampleDesc.Count = 1;
@@ -517,6 +636,173 @@ int main()
             if (!isRunning)
             {
                 break;
+            }
+
+            if (windowState.isMinimized)
+            {
+                if (WaitMessage() == FALSE)
+                {
+                    const DWORD error = GetLastError();
+
+                    dx12::ThrowIfFailed(
+                        HRESULT_FROM_WIN32(error),
+                        "WaitMessage"
+                    );
+                }
+
+                continue;
+            }
+
+            if (windowState.resizePending)
+            {
+                const UINT requestedWidth =
+                    windowState.pendingWidth;
+
+                const UINT requestedHeight =
+                    windowState.pendingHeight;
+
+                if (requestedWidth == 0 ||
+                    requestedHeight == 0)
+                {
+                    windowState.isMinimized = true;
+                    windowState.resizePending = false;
+                    continue;
+                }
+
+                if (requestedWidth == swapChainWidth &&
+                    requestedHeight == swapChainHeight)
+                {
+                    windowState.resizePending = false;
+                }
+                else
+                {
+                    // Stop before releasing the old swap-chain buffers.
+                    // The last submitted Fence value represents all earlier work
+                    // because commands and Fence signals execute in queue order.
+                    const UINT64 lastSubmittedFenceValue =
+                        nextFenceValue - 1;
+
+                    if (lastSubmittedFenceValue != 0)
+                    {
+                        const UINT64 completedValue =
+                            fence->GetCompletedValue();
+
+                        if (completedValue == UINT64_MAX)
+                        {
+                            throw std::runtime_error(
+                                "ID3D12Fence::GetCompletedValue indicates "
+                                "device removal during swap-chain resize."
+                            );
+                        }
+
+                        if (completedValue <
+                            lastSubmittedFenceValue)
+                        {
+                            dx12::ThrowIfFailed(
+                                fence->SetEventOnCompletion(
+                                    lastSubmittedFenceValue,
+                                    fenceEvent.get()
+                                ),
+                                "Resize ID3D12Fence::SetEventOnCompletion"
+                            );
+
+                            const DWORD waitResult =
+                                WaitForSingleObject(
+                                    fenceEvent.get(),
+                                    INFINITE
+                                );
+
+                            if (waitResult == WAIT_FAILED)
+                            {
+                                const DWORD error =
+                                    GetLastError();
+
+                                dx12::ThrowIfFailed(
+                                    HRESULT_FROM_WIN32(error),
+                                    "Resize WaitForSingleObject"
+                                );
+                            }
+
+                            if (waitResult != WAIT_OBJECT_0)
+                            {
+                                throw std::runtime_error(
+                                    "Resize WaitForSingleObject returned "
+                                    "an unexpected result."
+                                );
+                            }
+                        }
+                    }
+
+                    // ResizeBuffers requires the application to release every
+                    // reference obtained through IDXGISwapChain::GetBuffer.
+                    for (auto& backBuffer : backBuffers)
+                    {
+                        backBuffer.Reset();
+                    }
+
+                    dx12::ThrowIfFailed(
+                        _IDXGISwapChain3->ResizeBuffers(
+                            swapChainBufferCount,
+                            requestedWidth,
+                            requestedHeight,
+                            DXGI_FORMAT_R8G8B8A8_UNORM,
+                            0
+                        ),
+                        "IDXGISwapChain3::ResizeBuffers"
+                    );
+
+                    D3D12_CPU_DESCRIPTOR_HANDLE
+                        resizedRtvHandle = rtvHeapStart;
+
+                    for (UINT bufferIndex = 0;
+                        bufferIndex < swapChainBufferCount;
+                        ++bufferIndex)
+                    {
+                        dx12::ThrowIfFailed(
+                            _IDXGISwapChain3->GetBuffer(
+                                bufferIndex,
+                                IID_PPV_ARGS(
+                                    backBuffers[bufferIndex]
+                                        .ReleaseAndGetAddressOf()
+                                )
+                            ),
+                            "Resize IDXGISwapChain3::GetBuffer"
+                        );
+
+                        dx12::ThrowIfFailed(
+                            backBuffers[bufferIndex]->SetName(
+                                backBufferNames[bufferIndex]
+                            ),
+                            "Resize ID3D12Resource::SetName"
+                        );
+
+                        device->CreateRenderTargetView(
+                            backBuffers[bufferIndex].Get(),
+                            nullptr,
+                            resizedRtvHandle
+                        );
+
+                        resizedRtvHandle.ptr +=
+                            static_cast<SIZE_T>(
+                                rtvDescriptorSize
+                            );
+                    }
+
+                    // The resized buffers have never been submitted. The allocator
+                    // reuse is also safe because all earlier queue work was drained.
+                    frameFenceValues.fill(0);
+
+                    swapChainWidth = requestedWidth;
+                    swapChainHeight = requestedHeight;
+                    windowState.resizePending = false;
+
+                    std::cout
+                        << "Swap chain resized to "
+                        << swapChainWidth
+                        << " x "
+                        << swapChainHeight
+                        << ".\n";
+                }
             }
 
             // Query this every frame. Do not assume buffer 0 and buffer 1
