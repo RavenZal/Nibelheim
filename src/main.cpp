@@ -11,6 +11,8 @@
 #include <exception>
 #include <iostream>
 
+#include <array>
+
 namespace
 {
 class ScopedEventHandle final
@@ -264,6 +266,8 @@ int main()
             );  
         }
         
+        constexpr UINT swapChainBufferCount = 2;
+
         DXGI_SWAP_CHAIN_DESC1 chainDesc1{};
         chainDesc1.Width = Width;
         chainDesc1.Height = Height;
@@ -272,7 +276,7 @@ int main()
         chainDesc1.SampleDesc.Count = 1;
         chainDesc1.SampleDesc.Quality = 0;
         chainDesc1.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        chainDesc1.BufferCount = 2;
+        chainDesc1.BufferCount = swapChainBufferCount;
         chainDesc1.Scaling = DXGI_SCALING_STRETCH;
         chainDesc1.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         chainDesc1.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
@@ -298,7 +302,73 @@ int main()
         );
         std::cout << "IDXGISwapChain3 Create Success" << "\n";
         
+        //RTV
+        Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> desHeap;
         
+        D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        heapDesc.NumDescriptors = swapChainBufferCount;
+        heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        heapDesc.NodeMask = 0;
+        dx12::ThrowIfFailed(
+            device->CreateDescriptorHeap(
+                &heapDesc,
+                IID_PPV_ARGS(desHeap.GetAddressOf())
+            ),
+            "CreateDescriptorHeap"
+        );
+        
+        dx12::ThrowIfFailed(
+            desHeap->SetName(L"RTV Heap"),
+            "desHeap::SetName"
+        );
+
+        UINT rtvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        D3D12_CPU_DESCRIPTOR_HANDLE currentRtvHandle =
+            desHeap->GetCPUDescriptorHandleForHeapStart();
+        std::array<
+            Microsoft::WRL::ComPtr<ID3D12Resource>,
+            swapChainBufferCount
+        > backBuffers;
+
+        constexpr const wchar_t* backBufferNames[swapChainBufferCount] = {
+            L"Swap Chain Back Buffer 0",
+            L"Swap Chain Back Buffer 1"
+        };
+
+        for (UINT bufferIndex = 0;
+            bufferIndex < swapChainBufferCount;
+            ++bufferIndex)
+        {
+            dx12::ThrowIfFailed(
+                _IDXGISwapChain3->GetBuffer(
+                    bufferIndex,
+                    IID_PPV_ARGS(
+                        backBuffers[bufferIndex].ReleaseAndGetAddressOf()
+                    )
+                ),
+                "IDXGISwapChain3::GetBuffer"
+            );
+
+            dx12::ThrowIfFailed(
+                backBuffers[bufferIndex]->SetName(
+                    backBufferNames[bufferIndex]
+                ),
+                "ID3D12Resource::SetName"
+            );
+
+            device->CreateRenderTargetView(
+                backBuffers[bufferIndex].Get(),
+                nullptr,
+                currentRtvHandle
+            );
+
+            currentRtvHandle.ptr +=
+                static_cast<SIZE_T>(rtvDescriptorSize);
+        }
+        std::cout << "RTV Create Success" << "\n";
+
+
         //Command Allocator
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> CommandAllocator;
         dx12::ThrowIfFailed(
