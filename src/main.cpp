@@ -13,6 +13,14 @@
 
 #include <array>
 
+#include <filesystem>
+#include <string>
+
+#include <fstream>
+#include <vector>
+
+#include <cstring>
+
 namespace
 {
 
@@ -23,6 +31,110 @@ struct WindowState final
     UINT pendingWidth = 0;
     UINT pendingHeight = 0;
 };
+
+//file
+[[nodiscard]] std::filesystem::path GetExecutableDirectory()
+{
+    constexpr DWORD pathBufferSize = 32768;
+
+    std::wstring executablePath(
+        pathBufferSize,
+        L'\0'
+    );
+
+    SetLastError(ERROR_SUCCESS);
+
+    const DWORD pathLength = GetModuleFileNameW(
+        nullptr,
+        executablePath.data(),
+        pathBufferSize
+    );
+
+    if (pathLength == 0)
+    {
+        const DWORD error = GetLastError();
+
+        dx12::ThrowIfFailed(
+            HRESULT_FROM_WIN32(error),
+            "GetModuleFileNameW"
+        );
+    }
+
+    if (pathLength >= pathBufferSize)
+    {
+        throw std::runtime_error(
+            "The executable path was truncated."
+        );
+    }
+
+    executablePath.resize(pathLength);
+
+    return std::filesystem::path(
+        executablePath
+    ).parent_path();
+}
+
+//read binary file
+[[nodiscard]] std::vector<char> ReadBinaryFile(
+    const std::filesystem::path& filePath)
+{
+    std::ifstream file(
+        filePath,
+        std::ios::binary | std::ios::ate
+    );
+
+    if (!file.is_open())
+    {
+        throw std::runtime_error(
+            "Failed to open binary file: " +
+            filePath.string()
+        );
+    }
+
+    const std::streampos endPosition =
+        file.tellg();
+
+    if (endPosition <= 0)
+    {
+        throw std::runtime_error(
+            "Binary file is empty or its size could not be read: " +
+            filePath.string()
+        );
+    }
+
+    const auto fileSize =
+        static_cast<std::size_t>(endPosition);
+
+    std::vector<char> fileBytes(fileSize);
+
+    file.seekg(
+        0,
+        std::ios::beg
+    );
+
+    if (!file.read(
+            fileBytes.data(),
+            static_cast<std::streamsize>(fileBytes.size())))
+    {
+        throw std::runtime_error(
+            "Failed to read the complete binary file: " +
+            filePath.string()
+        );
+    }
+
+    return fileBytes;
+}
+
+struct Vertex
+{
+    float position[3];
+    float color[4];
+};
+
+static_assert(
+    sizeof(Vertex) == sizeof(float) * 7,
+    "Vertex must contain exactly seven floats."
+);
 
 class ScopedEventHandle final
 {
@@ -335,6 +447,451 @@ int main()
 
         std::cout << "Direct3D 12 device created successfully "
                      "(minimum feature level 11_0).\n";
+
+        //Load Shader by HLSL CSO
+        //Cheak Path Before Compilation
+        const std::filesystem::path executableDirectory =
+        GetExecutableDirectory();
+        
+        const std::filesystem::path vertexShaderPath =
+        executableDirectory /
+        L"shaders" /
+        L"TrianglesVS.cso";
+        
+        const std::filesystem::path pixelShaderPath =
+        executableDirectory /
+        L"shaders" /
+        L"TrianglesPS.cso";
+        
+        const std::vector<char> vertexShaderBytes =
+            ReadBinaryFile(vertexShaderPath);
+
+        const std::vector<char> pixelShaderBytes =
+            ReadBinaryFile(pixelShaderPath);
+
+        std::cout
+            << "Vertex shader loaded: "
+            << vertexShaderBytes.size()
+            << " bytes.\n";
+
+        std::cout
+            << "Pixel shader loaded: "
+            << pixelShaderBytes.size()
+            << " bytes.\n";
+
+        const D3D12_SHADER_BYTECODE vertexShaderBytecode{
+            .pShaderBytecode = vertexShaderBytes.data(),
+            .BytecodeLength = vertexShaderBytes.size()
+        };
+
+        const D3D12_SHADER_BYTECODE pixelShaderBytecode{
+            .pShaderBytecode = pixelShaderBytes.data(),
+            .BytecodeLength = pixelShaderBytes.size()
+        };
+
+        //Root Signature
+            //load and set into BLOB
+        D3D12_ROOT_SIGNATURE_DESC rootSignatureDescription{};
+
+        rootSignatureDescription.NumParameters = 0;
+        rootSignatureDescription.pParameters = nullptr;
+
+        rootSignatureDescription.NumStaticSamplers = 0;
+        rootSignatureDescription.pStaticSamplers = nullptr;
+
+        rootSignatureDescription.Flags =
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+        Microsoft::WRL::ComPtr<ID3DBlob>
+            serializedRootSignature;
+
+        Microsoft::WRL::ComPtr<ID3DBlob>
+            rootSignatureDiagnostics;
+
+        const HRESULT rootSignatureSerializationResult =
+            D3D12SerializeRootSignature(
+                &rootSignatureDescription,
+                D3D_ROOT_SIGNATURE_VERSION_1,
+                serializedRootSignature.GetAddressOf(),
+                rootSignatureDiagnostics.GetAddressOf());
+                
+        if (rootSignatureDiagnostics != nullptr &&
+            rootSignatureDiagnostics->GetBufferSize() > 0)
+        {
+            std::cerr
+                << "Root signature serialization diagnostics:\n";
+
+            std::cerr.write(
+                static_cast<const char*>(
+                    rootSignatureDiagnostics->GetBufferPointer()
+                ),
+                static_cast<std::streamsize>(
+                    rootSignatureDiagnostics->GetBufferSize()
+                )
+            );
+
+            std::cerr << '\n';
+        }    
+
+        dx12::ThrowIfFailed(
+            rootSignatureSerializationResult,
+            "D3D12SerializeRootSignature"
+        );
+
+            //Signature
+        Microsoft::WRL::ComPtr<ID3D12RootSignature>
+            rootSignature;
+
+        dx12::ThrowIfFailed(
+            device->CreateRootSignature(
+                0,
+                serializedRootSignature->GetBufferPointer(),
+                serializedRootSignature->GetBufferSize(),
+                IID_PPV_ARGS(rootSignature.GetAddressOf())
+            ),
+            "ID3D12Device::CreateRootSignature"
+        );
+
+        dx12::ThrowIfFailed(
+            rootSignature->SetName(
+                L"Triangle Root Signature"
+            ),
+            "ID3D12RootSignature::SetName"
+        );
+
+        std::cout
+        << "Triangle root signature created successfully.\n";
+
+        //Vertex Buffer
+        constexpr std::array<Vertex, 3> triangleVertices{{
+            {
+                {0.0f, 0.6f, 0.0f},
+                {1.0f, 0.0f, 0.0f, 1.0f}
+            },
+            {
+                {0.6f, -0.6f, 0.0f},
+                {0.0f, 1.0f, 0.0f, 1.0f}
+            },
+            {
+                {-0.6f, -0.6f, 0.0f},
+                {0.0f, 0.0f, 1.0f, 1.0f}
+            }
+        }};
+
+        D3D12_HEAP_PROPERTIES vertexHeapProperties{};
+
+        vertexHeapProperties.Type =
+            D3D12_HEAP_TYPE_UPLOAD;
+
+        vertexHeapProperties.CPUPageProperty =
+            D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+
+        vertexHeapProperties.MemoryPoolPreference =
+            D3D12_MEMORY_POOL_UNKNOWN;
+
+        vertexHeapProperties.CreationNodeMask = 1;
+        vertexHeapProperties.VisibleNodeMask = 1;
+
+        constexpr UINT vertexBufferSize =
+            static_cast<UINT>(sizeof(triangleVertices));
+
+        D3D12_RESOURCE_DESC vertexBufferDescription{};
+
+        vertexBufferDescription.Dimension =
+            D3D12_RESOURCE_DIMENSION_BUFFER;
+
+        vertexBufferDescription.Alignment = 0;
+
+        vertexBufferDescription.Width =
+            vertexBufferSize;
+
+        vertexBufferDescription.Height = 1;
+        vertexBufferDescription.DepthOrArraySize = 1;
+        vertexBufferDescription.MipLevels = 1;
+
+        vertexBufferDescription.Format =
+            DXGI_FORMAT_UNKNOWN;
+
+        vertexBufferDescription.SampleDesc.Count = 1;
+        vertexBufferDescription.SampleDesc.Quality = 0;
+
+        vertexBufferDescription.Layout =
+            D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        vertexBufferDescription.Flags =
+            D3D12_RESOURCE_FLAG_NONE;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource>
+            triangleVertexBuffer;
+
+        dx12::ThrowIfFailed(
+            device->CreateCommittedResource(
+                &vertexHeapProperties,
+                D3D12_HEAP_FLAG_NONE,
+                &vertexBufferDescription,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+                nullptr,
+                IID_PPV_ARGS(
+                    triangleVertexBuffer.GetAddressOf()
+                )
+            ),
+            "ID3D12Device::CreateCommittedResource "
+            "for triangle vertex buffer"
+        );
+
+        dx12::ThrowIfFailed(
+            triangleVertexBuffer->SetName(
+                L"Triangle Vertex Buffer"
+            ),
+            "ID3D12Resource::SetName for triangle vertex buffer"
+        );
+            //data transfer
+        D3D12_RANGE noCpuReads{
+            .Begin = 0,
+            .End = 0
+        };
+
+        void* mappedVertexData = nullptr;
+        dx12::ThrowIfFailed(
+            triangleVertexBuffer->Map(
+                0,
+                &noCpuReads,
+                &mappedVertexData
+            ),
+            "ID3D12Resource::Map for triangle vertex buffer"
+        );
+
+        if (mappedVertexData == nullptr)
+        {
+            throw std::runtime_error(
+                "Triangle vertex buffer mapping returned a null pointer."
+            );
+        }
+
+        std::memcpy(
+            mappedVertexData,
+            triangleVertices.data(),
+            vertexBufferSize
+        );
+
+        D3D12_RANGE writtenRange{
+            .Begin = 0,
+            .End = vertexBufferSize
+        };
+
+        triangleVertexBuffer->Unmap(
+            0,
+            &writtenRange
+        );
+        
+            //explain buffer
+        D3D12_VERTEX_BUFFER_VIEW
+        triangleVertexBufferView{};
+
+        triangleVertexBufferView.BufferLocation =
+            triangleVertexBuffer->GetGPUVirtualAddress();
+
+        triangleVertexBufferView.SizeInBytes =
+            vertexBufferSize;
+
+        triangleVertexBufferView.StrideInBytes =
+            static_cast<UINT>(sizeof(Vertex));
+
+        std::cout
+            << "Triangle vertex buffer created: "
+            << triangleVertices.size()
+            << " vertices, "
+            << vertexBufferSize
+            << " bytes.\n";
+
+        constexpr std::array<
+            D3D12_INPUT_ELEMENT_DESC,
+            2
+        > triangleInputElements{{
+            {
+                "POSITION",
+                0,
+                DXGI_FORMAT_R32G32B32_FLOAT,
+                0,
+                0,
+                D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+                0
+            },
+            {
+                "COLOR",
+                0,
+                DXGI_FORMAT_R32G32B32A32_FLOAT,
+                0,
+                12,
+                D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+                0
+            }
+        }};
+
+        D3D12_BLEND_DESC blendDescription{};
+
+        blendDescription.AlphaToCoverageEnable = FALSE;
+        blendDescription.IndependentBlendEnable = FALSE;
+
+        D3D12_RENDER_TARGET_BLEND_DESC&
+            renderTargetBlend =
+                blendDescription.RenderTarget[0];
+
+        renderTargetBlend.BlendEnable = FALSE;
+        renderTargetBlend.LogicOpEnable = FALSE;
+
+        renderTargetBlend.SrcBlend = D3D12_BLEND_ONE;
+        renderTargetBlend.DestBlend = D3D12_BLEND_ZERO;
+        renderTargetBlend.BlendOp = D3D12_BLEND_OP_ADD;
+
+        renderTargetBlend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        renderTargetBlend.DestBlendAlpha = D3D12_BLEND_ZERO;
+        renderTargetBlend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+
+        renderTargetBlend.LogicOp = D3D12_LOGIC_OP_NOOP;
+
+        renderTargetBlend.RenderTargetWriteMask =
+            D3D12_COLOR_WRITE_ENABLE_ALL;
+
+        D3D12_RASTERIZER_DESC rasterizerDescription{};
+
+        rasterizerDescription.FillMode =
+            D3D12_FILL_MODE_SOLID;
+
+        rasterizerDescription.CullMode =
+            D3D12_CULL_MODE_NONE;
+
+        rasterizerDescription.FrontCounterClockwise =
+            FALSE;
+
+        rasterizerDescription.DepthBias =
+            D3D12_DEFAULT_DEPTH_BIAS;
+
+        rasterizerDescription.DepthBiasClamp =
+            D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+
+        rasterizerDescription.SlopeScaledDepthBias =
+            D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+
+        rasterizerDescription.DepthClipEnable = TRUE;
+        rasterizerDescription.MultisampleEnable = FALSE;
+        rasterizerDescription.AntialiasedLineEnable = FALSE;
+        rasterizerDescription.ForcedSampleCount = 0;
+
+        rasterizerDescription.ConservativeRaster =
+            D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+        D3D12_DEPTH_STENCIL_DESC
+            depthStencilDescription{};
+
+        depthStencilDescription.DepthEnable = FALSE;
+
+        depthStencilDescription.DepthWriteMask =
+            D3D12_DEPTH_WRITE_MASK_ZERO;
+
+        depthStencilDescription.DepthFunc =
+            D3D12_COMPARISON_FUNC_ALWAYS;
+
+        depthStencilDescription.StencilEnable = FALSE;
+
+        depthStencilDescription.StencilReadMask =
+            D3D12_DEFAULT_STENCIL_READ_MASK;
+
+        depthStencilDescription.StencilWriteMask =
+            D3D12_DEFAULT_STENCIL_WRITE_MASK;
+
+        const D3D12_DEPTH_STENCILOP_DESC
+            disabledStencilOperations{
+                D3D12_STENCIL_OP_KEEP,
+                D3D12_STENCIL_OP_KEEP,
+                D3D12_STENCIL_OP_KEEP,
+                D3D12_COMPARISON_FUNC_ALWAYS
+            };
+
+        depthStencilDescription.FrontFace =
+            disabledStencilOperations;
+
+        depthStencilDescription.BackFace =
+            disabledStencilOperations;
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC
+            pipelineDescription{};
+        pipelineDescription.pRootSignature =
+            rootSignature.Get();
+        pipelineDescription.VS =
+            vertexShaderBytecode;
+        pipelineDescription.PS =
+            pixelShaderBytecode;
+
+        pipelineDescription.BlendState =
+            blendDescription;
+
+        pipelineDescription.RasterizerState =
+            rasterizerDescription;
+
+        pipelineDescription.DepthStencilState =
+            depthStencilDescription;
+
+        pipelineDescription.SampleMask = UINT_MAX;
+
+        pipelineDescription.InputLayout = {
+            triangleInputElements.data(),
+            static_cast<UINT>(
+                triangleInputElements.size()
+            )
+        };        
+
+        pipelineDescription.PrimitiveTopologyType =
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+
+        pipelineDescription.NumRenderTargets = 1;
+
+        pipelineDescription.RTVFormats[0] =
+            DXGI_FORMAT_R8G8B8A8_UNORM;
+
+        pipelineDescription.DSVFormat =
+            DXGI_FORMAT_UNKNOWN;
+
+        pipelineDescription.SampleDesc.Count = 1;
+        pipelineDescription.SampleDesc.Quality = 0;
+
+        pipelineDescription.IBStripCutValue =
+            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+
+        pipelineDescription.NodeMask = 0;
+
+        pipelineDescription.CachedPSO.pCachedBlob = nullptr;
+        pipelineDescription.CachedPSO.CachedBlobSizeInBytes = 0;
+
+        pipelineDescription.Flags =
+            D3D12_PIPELINE_STATE_FLAG_NONE;
+
+        Microsoft::WRL::ComPtr<ID3D12PipelineState>
+            trianglePipelineState;
+
+        dx12::ThrowIfFailed(
+            device->CreateGraphicsPipelineState(
+                &pipelineDescription,
+                IID_PPV_ARGS(
+                    trianglePipelineState.GetAddressOf()
+                )
+            ),
+            "ID3D12Device::CreateGraphicsPipelineState"
+        );
+
+        dx12::ThrowIfFailed(
+            trianglePipelineState->SetName(
+                L"Triangle Graphics Pipeline State"
+            ),
+            "ID3D12PipelineState::SetName"
+        );
+
+        std::cout
+            << "Triangle graphics pipeline state "
+            "created successfully.\n";
+
+
+
 
         //Device Queue of Command
         D3D12_COMMAND_QUEUE_DESC commandQueueDescription{};
@@ -918,6 +1475,44 @@ int main()
                 1,
                 &toRenderTargetBarrier
             );
+            
+            //Draw
+            D3D12_VIEWPORT viewport{};
+
+            viewport.TopLeftX = 0.0f;
+            viewport.TopLeftY = 0.0f;
+            viewport.Width =
+                static_cast<FLOAT>(swapChainWidth);
+            viewport.Height =
+                static_cast<FLOAT>(swapChainHeight);
+            viewport.MinDepth = 0.0f;
+            viewport.MaxDepth = 1.0f;
+
+            D3D12_RECT scissorRect{};
+
+            scissorRect.left = 0;
+            scissorRect.top = 0;
+            scissorRect.right =
+                static_cast<LONG>(swapChainWidth);
+            scissorRect.bottom =
+                static_cast<LONG>(swapChainHeight);
+
+            CommandList->RSSetViewports(
+                1,
+                &viewport
+            );
+
+            CommandList->RSSetScissorRects(
+                1,
+                &scissorRect
+            );
+
+            CommandList->OMSetRenderTargets(
+                1,
+                &currentBackBufferRtv,
+                FALSE,
+                nullptr
+            );
 
             constexpr FLOAT clearColor[4] = {
                 0.1F,
@@ -931,6 +1526,31 @@ int main()
                 clearColor,
                 0,
                 nullptr
+            );
+
+            CommandList->SetGraphicsRootSignature(
+                rootSignature.Get()
+            );
+
+            CommandList->SetPipelineState(
+                trianglePipelineState.Get()
+            );
+
+            CommandList->IASetPrimitiveTopology(
+                D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+            );
+
+            CommandList->IASetVertexBuffers(
+                0,
+                1,
+                &triangleVertexBufferView
+            );
+
+            CommandList->DrawInstanced(
+                3,
+                1,
+                0,
+                0
             );
 
             // Present requires the swap-chain buffer to be back in PRESENT state.

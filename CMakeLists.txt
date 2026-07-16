@@ -30,6 +30,121 @@ target_link_libraries(DX12EnvironmentCheck
         dxguid
 )
 
+if(NOT CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+    message(FATAL_ERROR
+        "The selected generator did not report a Windows SDK version. "
+        "Configure this project with the msvc-x64 preset."
+    )
+endif()
+
+cmake_host_system_information(
+    RESULT WINDOWS_KITS_ROOT
+    QUERY WINDOWS_REGISTRY
+        "HKLM/SOFTWARE/Microsoft/Windows Kits/Installed Roots"
+    VALUE KitsRoot10
+    VIEW 32
+    ERROR_VARIABLE WINDOWS_KITS_ERROR
+)
+
+if(WINDOWS_KITS_ERROR OR NOT WINDOWS_KITS_ROOT)
+    message(FATAL_ERROR
+        "Could not locate the Windows 10/11 SDK installation root: "
+        "${WINDOWS_KITS_ERROR}"
+    )
+endif()
+
+file(TO_CMAKE_PATH
+    "${WINDOWS_KITS_ROOT}"
+    WINDOWS_KITS_ROOT
+)
+
+set(DXC_EXECUTABLE
+    "${WINDOWS_KITS_ROOT}/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64/dxc.exe"
+)
+
+if(NOT EXISTS "${DXC_EXECUTABLE}")
+    message(FATAL_ERROR
+        "Could not find the x64 DXC executable for Windows SDK "
+        "${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}: "
+        "${DXC_EXECUTABLE}"
+    )
+endif()
+
+message(STATUS "DXC executable: ${DXC_EXECUTABLE}")
+
+set(TRIANGLE_SHADER_SOURCE
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/Triangles.hlsl"
+)
+
+if(NOT EXISTS "${TRIANGLE_SHADER_SOURCE}")
+    message(FATAL_ERROR
+        "Triangle shader source was not found: ${TRIANGLE_SHADER_SOURCE}"
+    )
+endif()
+
+set(TRIANGLE_SHADER_OUTPUT_DIRECTORY
+    "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/shaders"
+)
+
+set(TRIANGLE_VERTEX_SHADER
+    "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}/TrianglesVS.cso"
+)
+
+set(TRIANGLE_PIXEL_SHADER
+    "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}/TrianglesPS.cso"
+)
+
+set(DXC_CONFIGURATION_ARGUMENTS
+    "$<$<CONFIG:Debug>:-Zi>"
+    "$<$<CONFIG:Debug>:-Qembed_debug>"
+    "$<$<CONFIG:Debug>:-Od>"
+    "$<$<NOT:$<CONFIG:Debug>>:-O3>"
+)
+
+add_custom_command(
+    OUTPUT "${TRIANGLE_VERTEX_SHADER}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}"
+    COMMAND "${DXC_EXECUTABLE}"
+        -nologo
+        -HV 2021
+        ${DXC_CONFIGURATION_ARGUMENTS}
+        -E VSMain
+        -T vs_6_0
+        -Fo "${TRIANGLE_VERTEX_SHADER}"
+        "${TRIANGLE_SHADER_SOURCE}"
+    DEPENDS "${TRIANGLE_SHADER_SOURCE}"
+    COMMENT "Compiling Triangles.hlsl vertex shader"
+    VERBATIM
+    COMMAND_EXPAND_LISTS
+)
+
+add_custom_command(
+    OUTPUT "${TRIANGLE_PIXEL_SHADER}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}"
+    COMMAND "${DXC_EXECUTABLE}"
+        -nologo
+        -HV 2021
+        ${DXC_CONFIGURATION_ARGUMENTS}
+        -E PSMain
+        -T ps_6_0
+        -Fo "${TRIANGLE_PIXEL_SHADER}"
+        "${TRIANGLE_SHADER_SOURCE}"
+    DEPENDS "${TRIANGLE_SHADER_SOURCE}"
+    COMMENT "Compiling Triangles.hlsl pixel shader"
+    VERBATIM
+    COMMAND_EXPAND_LISTS
+)
+
+add_custom_target(DX12Shaders
+    DEPENDS
+        "${TRIANGLE_VERTEX_SHADER}"
+        "${TRIANGLE_PIXEL_SHADER}"
+)
+
+add_dependencies(DX12EnvironmentCheck DX12Shaders)
+
 if(MSVC)
     target_compile_options(DX12EnvironmentCheck
         PRIVATE
