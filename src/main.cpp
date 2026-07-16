@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <dxgi.h>
 #include <dxgi1_4.h>
+#include <DirectXMath.h>
+#include <cstddef>
 
 #include <cstdlib>
 #include <exception>
@@ -134,6 +136,43 @@ struct Vertex
 static_assert(
     sizeof(Vertex) == sizeof(float) * 7,
     "Vertex must contain exactly seven floats."
+);
+
+struct TransformConstants final
+{
+    DirectX::XMFLOAT4X4 transform;
+};
+
+static_assert(
+    sizeof(TransformConstants) == sizeof(float) * 16,
+    "TransformConstants must contain exactly one 4x4 float matrix."
+);
+
+constexpr UINT constantBufferAlignment =
+    static_cast<UINT>(
+        D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT
+    );
+
+[[nodiscard]] constexpr UINT AlignConstantBufferSize(
+    UINT byteSize) noexcept
+{
+    return (
+        byteSize +
+        constantBufferAlignment -
+        1U
+    ) & ~(constantBufferAlignment - 1U);
+}
+
+constexpr UINT transformConstantBufferSize =
+    AlignConstantBufferSize(
+        static_cast<UINT>(
+            sizeof(TransformConstants)
+        )
+    );
+
+static_assert(
+    transformConstantBufferSize == 256,
+    "The transform constant-buffer allocation must be 256 bytes."
 );
 
 class ScopedEventHandle final
@@ -489,18 +528,31 @@ int main()
             .BytecodeLength = pixelShaderBytes.size()
         };
 
-        //Root Signature
-            //load and set into BLOB
+        // Root parameter 0 supplies one Constant Buffer View to vertex-shader
+        // register b0. It is a root descriptor, so this milestone does not
+        // require a shader-visible CBV/SRV/UAV descriptor heap.
+        D3D12_ROOT_PARAMETER transformRootParameter{};
+
+        transformRootParameter.ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_CBV;
+
+        transformRootParameter.Descriptor.ShaderRegister = 0;
+        transformRootParameter.Descriptor.RegisterSpace = 0;
+
+        transformRootParameter.ShaderVisibility =
+            D3D12_SHADER_VISIBILITY_VERTEX;
+
         D3D12_ROOT_SIGNATURE_DESC rootSignatureDescription{};
 
-        rootSignatureDescription.NumParameters = 0;
-        rootSignatureDescription.pParameters = nullptr;
+        rootSignatureDescription.NumParameters = 1;
+        rootSignatureDescription.pParameters =
+            &transformRootParameter;
 
         rootSignatureDescription.NumStaticSamplers = 0;
         rootSignatureDescription.pStaticSamplers = nullptr;
 
         rootSignatureDescription.Flags =
-        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
         Microsoft::WRL::ComPtr<ID3DBlob>
             serializedRootSignature;
@@ -1049,6 +1101,132 @@ int main()
         }
         std::cout << "RTV Create Success" << "\n";
 
+        // One transform Constant Buffer belongs to each swap-chain/back-buffer
+        // slot. The CPU updates a slot only after that slot's Fence value has
+        // completed, so the GPU never observes the CPU overwriting in-flight data.
+        std::array<
+            Microsoft::WRL::ComPtr<ID3D12Resource>,
+            swapChainBufferCount
+        > transformConstantBuffers;
+
+        std::array<
+            std::byte*,
+            swapChainBufferCount
+        > mappedTransformConstantData{};
+
+        constexpr const wchar_t*
+            transformConstantBufferNames[swapChainBufferCount] = {
+                L"Transform Constant Buffer 0",
+                L"Transform Constant Buffer 1"
+            };
+
+        D3D12_HEAP_PROPERTIES
+            transformConstantBufferHeapProperties{};
+
+        transformConstantBufferHeapProperties.Type =
+            D3D12_HEAP_TYPE_UPLOAD;
+
+        transformConstantBufferHeapProperties.CPUPageProperty =
+            D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+
+        transformConstantBufferHeapProperties.MemoryPoolPreference =
+            D3D12_MEMORY_POOL_UNKNOWN;
+
+        transformConstantBufferHeapProperties.CreationNodeMask = 1;
+        transformConstantBufferHeapProperties.VisibleNodeMask = 1;
+
+        D3D12_RESOURCE_DESC
+            transformConstantBufferDescription{};
+
+        transformConstantBufferDescription.Dimension =
+            D3D12_RESOURCE_DIMENSION_BUFFER;
+
+        transformConstantBufferDescription.Alignment = 0;
+
+        transformConstantBufferDescription.Width =
+            transformConstantBufferSize;
+
+        transformConstantBufferDescription.Height = 1;
+        transformConstantBufferDescription.DepthOrArraySize = 1;
+        transformConstantBufferDescription.MipLevels = 1;
+
+        transformConstantBufferDescription.Format =
+            DXGI_FORMAT_UNKNOWN;
+
+        transformConstantBufferDescription.SampleDesc.Count = 1;
+        transformConstantBufferDescription.SampleDesc.Quality = 0;
+
+        transformConstantBufferDescription.Layout =
+            D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        transformConstantBufferDescription.Flags =
+            D3D12_RESOURCE_FLAG_NONE;
+
+        // {0, 0} tells D3D12 that the CPU does not intend to read any
+        // bytes from the mapped upload resource.
+        const D3D12_RANGE transformConstantBufferNoCpuReads{
+            .Begin = 0,
+            .End = 0
+        };
+
+        for (UINT bufferIndex = 0;
+            bufferIndex < swapChainBufferCount;
+            ++bufferIndex)
+        {
+            dx12::ThrowIfFailed(
+                device->CreateCommittedResource(
+                    &transformConstantBufferHeapProperties,
+                    D3D12_HEAP_FLAG_NONE,
+                    &transformConstantBufferDescription,
+                    D3D12_RESOURCE_STATE_GENERIC_READ,
+                    nullptr,
+                    IID_PPV_ARGS(
+                        transformConstantBuffers[bufferIndex]
+                            .GetAddressOf()
+                    )
+                ),
+                "ID3D12Device::CreateCommittedResource "
+                "for transform constant buffer"
+            );
+
+            dx12::ThrowIfFailed(
+                transformConstantBuffers[bufferIndex]->SetName(
+                    transformConstantBufferNames[bufferIndex]
+                ),
+                "ID3D12Resource::SetName "
+                "for transform constant buffer"
+            );
+
+            void* mappedData = nullptr;
+
+            dx12::ThrowIfFailed(
+                transformConstantBuffers[bufferIndex]->Map(
+                    0,
+                    &transformConstantBufferNoCpuReads,
+                    &mappedData
+                ),
+                "ID3D12Resource::Map "
+                "for transform constant buffer"
+            );
+
+            if (mappedData == nullptr)
+            {
+                throw std::runtime_error(
+                    "Transform constant-buffer mapping "
+                    "returned a null pointer."
+                );
+            }
+
+            mappedTransformConstantData[bufferIndex] =
+                static_cast<std::byte*>(mappedData);
+        }
+
+        std::cout
+            << "Created and persistently mapped "
+            << swapChainBufferCount
+            << " transform constant buffers, "
+            << transformConstantBufferSize
+            << " bytes each.\n";        
 
         //Command Allocator
         // One command allocator for each swap-chain back buffer.
@@ -1164,7 +1342,12 @@ int main()
 
         MSG message{};
         bool isRunning = true;
-        
+
+        // Teaching-only animation state. This is deliberately frame-rate
+        // dependent so the current milestone does not introduce a timer system.
+        float triangleRotationRadians = 0.0F;
+        constexpr float rotationPerRenderedFrame = 0.01F;
+
         // ================================== //
         //          MAIN ROUND
         // ================================== //
@@ -1431,6 +1614,38 @@ int main()
                 }
             }
 
+            // Reaching this point means that the current frame slot has either
+            // never been submitted or its previous Fence value has completed.
+            // It is therefore safe for the CPU to overwrite this slot's
+            // Constant Buffer memory.
+            triangleRotationRadians +=
+                rotationPerRenderedFrame;
+
+            if (triangleRotationRadians >= DirectX::XM_2PI)
+            {
+                triangleRotationRadians -= DirectX::XM_2PI;
+            }
+
+            const DirectX::XMMATRIX transformMatrix =
+                DirectX::XMMatrixRotationZ(
+                    triangleRotationRadians
+                );
+
+            TransformConstants transformConstants{};
+
+            DirectX::XMStoreFloat4x4(
+                &transformConstants.transform,
+                transformMatrix
+            );
+
+            std::memcpy(
+                mappedTransformConstantData[
+                    currentBackBufferIndex
+                ],
+                &transformConstants,
+                sizeof(transformConstants)
+            );
+
             // The GPU has finished the previous commands stored in this
             // allocator, so its command memory can now be reused.
             dx12::ThrowIfFailed(
@@ -1534,6 +1749,15 @@ int main()
 
             CommandList->SetPipelineState(
                 trianglePipelineState.Get()
+            );
+
+            // Root parameter 0 is the CBV at HLSL register b0.
+            // Select the Constant Buffer owned by the current frame slot.
+            CommandList->SetGraphicsRootConstantBufferView(
+                0,
+                transformConstantBuffers[
+                    currentBackBufferIndex
+                ]->GetGPUVirtualAddress()
             );
 
             CommandList->IASetPrimitiveTopology(
