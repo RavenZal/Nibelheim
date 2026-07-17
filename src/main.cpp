@@ -630,19 +630,36 @@ int main()
             }
         }};
 
-        D3D12_HEAP_PROPERTIES vertexHeapProperties{};
+        // Static geometry is copied once from a CPU-visible upload resource
+        // into a GPU-oriented default-heap resource. The upload resource must
+        // remain alive until the GPU copy has reached its Fence value.
+        D3D12_HEAP_PROPERTIES vertexDefaultHeapProperties{};
 
-        vertexHeapProperties.Type =
-            D3D12_HEAP_TYPE_UPLOAD;
+        vertexDefaultHeapProperties.Type =
+            D3D12_HEAP_TYPE_DEFAULT;
 
-        vertexHeapProperties.CPUPageProperty =
+        vertexDefaultHeapProperties.CPUPageProperty =
             D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 
-        vertexHeapProperties.MemoryPoolPreference =
+        vertexDefaultHeapProperties.MemoryPoolPreference =
             D3D12_MEMORY_POOL_UNKNOWN;
 
-        vertexHeapProperties.CreationNodeMask = 1;
-        vertexHeapProperties.VisibleNodeMask = 1;
+        vertexDefaultHeapProperties.CreationNodeMask = 1;
+        vertexDefaultHeapProperties.VisibleNodeMask = 1;
+
+        D3D12_HEAP_PROPERTIES vertexUploadHeapProperties{};
+
+        vertexUploadHeapProperties.Type =
+            D3D12_HEAP_TYPE_UPLOAD;
+
+        vertexUploadHeapProperties.CPUPageProperty =
+            D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+
+        vertexUploadHeapProperties.MemoryPoolPreference =
+            D3D12_MEMORY_POOL_UNKNOWN;
+
+        vertexUploadHeapProperties.CreationNodeMask = 1;
+        vertexUploadHeapProperties.VisibleNodeMask = 1;
 
         constexpr UINT vertexBufferSize =
             static_cast<UINT>(sizeof(triangleVertices));
@@ -676,12 +693,15 @@ int main()
         Microsoft::WRL::ComPtr<ID3D12Resource>
             triangleVertexBuffer;
 
+        Microsoft::WRL::ComPtr<ID3D12Resource>
+            triangleVertexUploadBuffer;
+
         dx12::ThrowIfFailed(
             device->CreateCommittedResource(
-                &vertexHeapProperties,
+                &vertexDefaultHeapProperties,
                 D3D12_HEAP_FLAG_NONE,
                 &vertexBufferDescription,
-                D3D12_RESOURCE_STATE_GENERIC_READ,
+                D3D12_RESOURCE_STATE_COPY_DEST,
                 nullptr,
                 IID_PPV_ARGS(
                     triangleVertexBuffer.GetAddressOf()
@@ -697,7 +717,33 @@ int main()
             ),
             "ID3D12Resource::SetName for triangle vertex buffer"
         );
-            //data transfer
+
+        dx12::ThrowIfFailed(
+            device->CreateCommittedResource(
+                &vertexUploadHeapProperties,
+                D3D12_HEAP_FLAG_NONE,
+                &vertexBufferDescription,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+                nullptr,
+                IID_PPV_ARGS(
+                    triangleVertexUploadBuffer.GetAddressOf()
+                )
+            ),
+            "ID3D12Device::CreateCommittedResource "
+            "for triangle vertex upload buffer"
+        );
+
+        dx12::ThrowIfFailed(
+            triangleVertexUploadBuffer->SetName(
+                L"Triangle Vertex Upload Buffer"
+            ),
+            "ID3D12Resource::SetName "
+            "for triangle vertex upload buffer"
+        );
+
+        // Copy the CPU vertex array into the temporary upload resource. The
+        // GPU copy into triangleVertexBuffer is recorded after the main
+        // graphics command list is created.
         D3D12_RANGE noCpuReads{
             .Begin = 0,
             .End = 0
@@ -705,18 +751,19 @@ int main()
 
         void* mappedVertexData = nullptr;
         dx12::ThrowIfFailed(
-            triangleVertexBuffer->Map(
+            triangleVertexUploadBuffer->Map(
                 0,
                 &noCpuReads,
                 &mappedVertexData
             ),
-            "ID3D12Resource::Map for triangle vertex buffer"
+            "ID3D12Resource::Map for triangle vertex upload buffer"
         );
 
         if (mappedVertexData == nullptr)
         {
             throw std::runtime_error(
-                "Triangle vertex buffer mapping returned a null pointer."
+                "Triangle vertex upload buffer mapping returned "
+                "a null pointer."
             );
         }
 
@@ -731,7 +778,7 @@ int main()
             .End = vertexBufferSize
         };
 
-        triangleVertexBuffer->Unmap(
+        triangleVertexUploadBuffer->Unmap(
             0,
             &writtenRange
         );
@@ -750,11 +797,11 @@ int main()
             static_cast<UINT>(sizeof(Vertex));
 
         std::cout
-            << "Triangle vertex buffer created: "
+            << "Triangle default and upload vertex buffers created: "
             << triangleVertices.size()
             << " vertices, "
             << vertexBufferSize
-            << " bytes.\n";
+            << " bytes; GPU upload pending.\n";
 
         constexpr std::array<
             D3D12_INPUT_ELEMENT_DESC,
@@ -1281,12 +1328,44 @@ int main()
             CommandList->SetName(L"Main Graphics Command List"),
             "ID3D12GraphicsCommandList::SetName"
         );
-        dx12::ThrowIfFailed(
-        CommandList->Close(),
-        "Initial ID3D12GraphicsCommandList::Close"
+
+        // The command list is created in the recording state. Copy the static
+        // vertex bytes from the temporary upload heap into the default heap,
+        // then make the destination legal for input-assembler vertex reads.
+        CommandList->CopyBufferRegion(
+            triangleVertexBuffer.Get(),
+            0,
+            triangleVertexUploadBuffer.Get(),
+            0,
+            vertexBufferSize
         );
 
-        std::cout << "ID3D12GraphicsCommandList Create and Close initially Success" << "\n";
+        D3D12_RESOURCE_BARRIER vertexBufferReadyBarrier{};
+        vertexBufferReadyBarrier.Type =
+            D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        vertexBufferReadyBarrier.Flags =
+            D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        vertexBufferReadyBarrier.Transition.pResource =
+            triangleVertexBuffer.Get();
+        vertexBufferReadyBarrier.Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        vertexBufferReadyBarrier.Transition.StateBefore =
+            D3D12_RESOURCE_STATE_COPY_DEST;
+        vertexBufferReadyBarrier.Transition.StateAfter =
+            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+
+        CommandList->ResourceBarrier(
+            1,
+            &vertexBufferReadyBarrier
+        );
+
+        dx12::ThrowIfFailed(
+            CommandList->Close(),
+            "Close vertex upload command list"
+        );
+
+        std::cout
+            << "Vertex-buffer copy and state transition recorded.\n";
 
         
 
@@ -1329,6 +1408,92 @@ int main()
                 "CreateEventW"
             );
         }
+
+        // Submit the one-time vertex upload before rendering begins. The
+        // upload buffer cannot be released merely because ExecuteCommandLists
+        // returned; the GPU consumes it asynchronously. Signal and wait for a
+        // dedicated initialization milestone before releasing that resource.
+        ID3D12CommandList* const vertexUploadCommandLists[] = {
+            CommandList.Get()
+        };
+
+        CommandQueue->ExecuteCommandLists(
+            1,
+            vertexUploadCommandLists
+        );
+
+        if (nextFenceValue == UINT64_MAX)
+        {
+            throw std::runtime_error(
+                "Fence value space was exhausted before vertex upload."
+            );
+        }
+
+        const UINT64 vertexUploadFenceValue =
+            nextFenceValue;
+
+        dx12::ThrowIfFailed(
+            CommandQueue->Signal(
+                fence.Get(),
+                vertexUploadFenceValue
+            ),
+            "Signal vertex-buffer upload Fence"
+        );
+
+        ++nextFenceValue;
+
+        const UINT64 vertexUploadCompletedValue =
+            fence->GetCompletedValue();
+
+        if (vertexUploadCompletedValue == UINT64_MAX)
+        {
+            throw std::runtime_error(
+                "ID3D12Fence::GetCompletedValue indicates device "
+                "removal during vertex-buffer upload."
+            );
+        }
+
+        if (vertexUploadCompletedValue < vertexUploadFenceValue)
+        {
+            dx12::ThrowIfFailed(
+                fence->SetEventOnCompletion(
+                    vertexUploadFenceValue,
+                    fenceEvent.get()
+                ),
+                "SetEventOnCompletion for vertex-buffer upload"
+            );
+
+            const DWORD vertexUploadWaitResult =
+                WaitForSingleObject(
+                    fenceEvent.get(),
+                    INFINITE
+                );
+
+            if (vertexUploadWaitResult == WAIT_FAILED)
+            {
+                const DWORD error = GetLastError();
+
+                dx12::ThrowIfFailed(
+                    HRESULT_FROM_WIN32(error),
+                    "WaitForSingleObject for vertex-buffer upload"
+                );
+            }
+
+            if (vertexUploadWaitResult != WAIT_OBJECT_0)
+            {
+                throw std::runtime_error(
+                    "Vertex-buffer upload wait returned an unexpected "
+                    "result."
+                );
+            }
+        }
+
+        triangleVertexUploadBuffer.Reset();
+
+        std::cout
+            << "Triangle vertex upload completed at Fence value "
+            << vertexUploadFenceValue
+            << "; the temporary upload buffer was released.\n";
 
         //window
         //ShowWindow             
