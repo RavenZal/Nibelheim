@@ -8,6 +8,7 @@
 #include <dxgi1_4.h>
 #include <DirectXMath.h>
 #include <cstddef>
+#include <cstdint>
 
 #include <cstdlib>
 #include <exception>
@@ -630,6 +631,14 @@ int main()
             }
         }};
 
+        // These values select entries in triangleVertices. The 16-bit CPU
+        // element type must match DXGI_FORMAT_R16_UINT in the index view.
+        constexpr std::array<std::uint16_t, 3> triangleIndices{{
+            0,
+            1,
+            2
+        }};
+
         // Static geometry is copied once from a CPU-visible upload resource
         // into a GPU-oriented default-heap resource. The upload resource must
         // remain alive until the GPU copy has reached its Fence value.
@@ -664,6 +673,9 @@ int main()
         constexpr UINT vertexBufferSize =
             static_cast<UINT>(sizeof(triangleVertices));
 
+        constexpr UINT indexBufferSize =
+            static_cast<UINT>(sizeof(triangleIndices));
+
         D3D12_RESOURCE_DESC vertexBufferDescription{};
 
         vertexBufferDescription.Dimension =
@@ -690,11 +702,22 @@ int main()
         vertexBufferDescription.Flags =
             D3D12_RESOURCE_FLAG_NONE;
 
+        D3D12_RESOURCE_DESC indexBufferDescription =
+            vertexBufferDescription;
+
+        indexBufferDescription.Width = indexBufferSize;
+
         Microsoft::WRL::ComPtr<ID3D12Resource>
             triangleVertexBuffer;
 
         Microsoft::WRL::ComPtr<ID3D12Resource>
             triangleVertexUploadBuffer;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource>
+            triangleIndexBuffer;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource>
+            triangleIndexUploadBuffer;
 
         dx12::ThrowIfFailed(
             device->CreateCommittedResource(
@@ -741,6 +764,51 @@ int main()
             "for triangle vertex upload buffer"
         );
 
+        dx12::ThrowIfFailed(
+            device->CreateCommittedResource(
+                &vertexDefaultHeapProperties,
+                D3D12_HEAP_FLAG_NONE,
+                &indexBufferDescription,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr,
+                IID_PPV_ARGS(
+                    triangleIndexBuffer.GetAddressOf()
+                )
+            ),
+            "ID3D12Device::CreateCommittedResource "
+            "for triangle index buffer"
+        );
+
+        dx12::ThrowIfFailed(
+            triangleIndexBuffer->SetName(
+                L"Triangle Index Buffer"
+            ),
+            "ID3D12Resource::SetName for triangle index buffer"
+        );
+
+        dx12::ThrowIfFailed(
+            device->CreateCommittedResource(
+                &vertexUploadHeapProperties,
+                D3D12_HEAP_FLAG_NONE,
+                &indexBufferDescription,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+                nullptr,
+                IID_PPV_ARGS(
+                    triangleIndexUploadBuffer.GetAddressOf()
+                )
+            ),
+            "ID3D12Device::CreateCommittedResource "
+            "for triangle index upload buffer"
+        );
+
+        dx12::ThrowIfFailed(
+            triangleIndexUploadBuffer->SetName(
+                L"Triangle Index Upload Buffer"
+            ),
+            "ID3D12Resource::SetName "
+            "for triangle index upload buffer"
+        );
+
         // Copy the CPU vertex array into the temporary upload resource. The
         // GPU copy into triangleVertexBuffer is recorded after the main
         // graphics command list is created.
@@ -782,6 +850,40 @@ int main()
             0,
             &writtenRange
         );
+
+        void* mappedIndexData = nullptr;
+        dx12::ThrowIfFailed(
+            triangleIndexUploadBuffer->Map(
+                0,
+                &noCpuReads,
+                &mappedIndexData
+            ),
+            "ID3D12Resource::Map for triangle index upload buffer"
+        );
+
+        if (mappedIndexData == nullptr)
+        {
+            throw std::runtime_error(
+                "Triangle index upload buffer mapping returned "
+                "a null pointer."
+            );
+        }
+
+        std::memcpy(
+            mappedIndexData,
+            triangleIndices.data(),
+            indexBufferSize
+        );
+
+        D3D12_RANGE indexWrittenRange{
+            .Begin = 0,
+            .End = indexBufferSize
+        };
+
+        triangleIndexUploadBuffer->Unmap(
+            0,
+            &indexWrittenRange
+        );
         
             //explain buffer
         D3D12_VERTEX_BUFFER_VIEW
@@ -795,6 +897,24 @@ int main()
 
         triangleVertexBufferView.StrideInBytes =
             static_cast<UINT>(sizeof(Vertex));
+
+        D3D12_INDEX_BUFFER_VIEW triangleIndexBufferView{};
+
+        triangleIndexBufferView.BufferLocation =
+            triangleIndexBuffer->GetGPUVirtualAddress();
+
+        triangleIndexBufferView.SizeInBytes =
+            indexBufferSize;
+
+        triangleIndexBufferView.Format =
+            DXGI_FORMAT_R16_UINT;
+
+        std::cout
+            << "Triangle default and upload index buffers created: "
+            << triangleIndices.size()
+            << " indices, "
+            << indexBufferSize
+            << " bytes; GPU upload pending.\n";
 
         std::cout
             << "Triangle default and upload vertex buffers created: "
@@ -1332,6 +1452,8 @@ int main()
         // The command list is created in the recording state. Copy the static
         // vertex bytes from the temporary upload heap into the default heap,
         // then make the destination legal for input-assembler vertex reads.
+        // The input assembler cannot read the default-heap index buffer until
+        // the copy has completed and its state is changed to INDEX_BUFFER.
         CommandList->CopyBufferRegion(
             triangleVertexBuffer.Get(),
             0,
@@ -1357,6 +1479,33 @@ int main()
         CommandList->ResourceBarrier(
             1,
             &vertexBufferReadyBarrier
+        );
+
+        CommandList->CopyBufferRegion(
+            triangleIndexBuffer.Get(),
+            0,
+            triangleIndexUploadBuffer.Get(),
+            0,
+            indexBufferSize
+        );
+
+        D3D12_RESOURCE_BARRIER indexBufferReadyBarrier{};
+        indexBufferReadyBarrier.Type =
+            D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        indexBufferReadyBarrier.Flags =
+            D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        indexBufferReadyBarrier.Transition.pResource =
+            triangleIndexBuffer.Get();
+        indexBufferReadyBarrier.Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        indexBufferReadyBarrier.Transition.StateBefore =
+            D3D12_RESOURCE_STATE_COPY_DEST;
+        indexBufferReadyBarrier.Transition.StateAfter =
+            D3D12_RESOURCE_STATE_INDEX_BUFFER;
+
+        CommandList->ResourceBarrier(
+            1,
+            &indexBufferReadyBarrier
         );
 
         dx12::ThrowIfFailed(
@@ -1488,7 +1637,10 @@ int main()
             }
         }
 
+        // This Fence covers both copies recorded in the initialization command
+        // list, so both temporary upload resources are now safe to release.
         triangleVertexUploadBuffer.Reset();
+        triangleIndexUploadBuffer.Reset();
 
         std::cout
             << "Triangle vertex upload completed at Fence value "
@@ -1935,9 +2087,16 @@ int main()
                 &triangleVertexBufferView
             );
 
-            CommandList->DrawInstanced(
+            // The index view supplies vertex numbers; the vertex view above
+            // still supplies the POSITION and COLOR data for those numbers.
+            CommandList->IASetIndexBuffer(
+                &triangleIndexBufferView
+            );
+
+            CommandList->DrawIndexedInstanced(
                 3,
                 1,
+                0,
                 0,
                 0
             );
