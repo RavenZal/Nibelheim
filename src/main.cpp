@@ -7,6 +7,7 @@
 #include <dxgi.h>
 #include <dxgi1_4.h>
 #include <DirectXMath.h>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 
@@ -33,6 +34,13 @@ struct WindowState final
     bool isMinimized = false;
     UINT pendingWidth = 0;
     UINT pendingHeight = 0;
+};
+
+struct CameraState final
+{
+    DirectX::XMFLOAT3 position{0.0f, 0.0f, -3.0f};
+    float yawRadians = 0.0f;
+    float pitchRadians = 0.0f;
 };
 
 //file
@@ -141,12 +149,14 @@ static_assert(
 
 struct TransformConstants final
 {
-    DirectX::XMFLOAT4X4 transform;
+    DirectX::XMFLOAT4X4 model;
+    DirectX::XMFLOAT4X4 view;
+    DirectX::XMFLOAT4X4 projection;
 };
 
 static_assert(
-    sizeof(TransformConstants) == sizeof(float) * 16,
-    "TransformConstants must contain exactly one 4x4 float matrix."
+    sizeof(TransformConstants) == sizeof(float) * 48,
+    "TransformConstants must contain exactly three 4x4 float matrices."
 );
 
 constexpr UINT constantBufferAlignment =
@@ -742,7 +752,7 @@ int main()
                 &vertexDefaultHeapProperties,
                 D3D12_HEAP_FLAG_NONE,
                 &vertexBufferDescription,
-                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_COMMON,
                 nullptr,
                 IID_PPV_ARGS(
                     triangleVertexBuffer.GetAddressOf()
@@ -787,7 +797,7 @@ int main()
                 &vertexDefaultHeapProperties,
                 D3D12_HEAP_FLAG_NONE,
                 &indexBufferDescription,
-                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_COMMON,
                 nullptr,
                 IID_PPV_ARGS(
                     triangleIndexBuffer.GetAddressOf()
@@ -1807,10 +1817,21 @@ int main()
         MSG message{};
         bool isRunning = true;
 
-        // Teaching-only animation state. This is deliberately frame-rate
-        // dependent so the current milestone does not introduce a timer system.
+        CameraState cameraState{};
+
         float triangleRotationRadians = 0.0F;
-        constexpr float rotationPerRenderedFrame = 0.01F;
+        constexpr float rotationRadiansPerSecond = 0.6F;
+        constexpr float cameraMovementUnitsPerSecond = 2.5F;
+        constexpr float mouseRadiansPerPixel = 0.0025F;
+        constexpr float maximumFrameDeltaSeconds = 0.1F;
+        constexpr float maximumPitchRadians =
+            DirectX::XM_PIDIV2 - 0.01F;
+
+        auto previousFrameTime =
+            std::chrono::steady_clock::now();
+
+        POINT previousMousePosition{};
+        bool hasPreviousMousePosition = false;
 
         // ================================== //
         //          MAIN ROUND
@@ -2094,24 +2115,265 @@ int main()
             // never been submitted or its previous Fence value has completed.
             // It is therefore safe for the CPU to overwrite this slot's
             // Constant Buffer memory.
-            triangleRotationRadians +=
-                rotationPerRenderedFrame;
+            const auto currentFrameTime =
+                std::chrono::steady_clock::now();
 
-            if (triangleRotationRadians >= DirectX::XM_2PI)
+            float frameDeltaSeconds =
+                std::chrono::duration<float>(
+                    currentFrameTime - previousFrameTime
+                ).count();
+
+            previousFrameTime = currentFrameTime;
+
+            if (frameDeltaSeconds > maximumFrameDeltaSeconds)
             {
-                triangleRotationRadians -= DirectX::XM_2PI;
+                frameDeltaSeconds = maximumFrameDeltaSeconds;
             }
 
-            const DirectX::XMMATRIX transformMatrix =
+            const bool rendererHasFocus =
+                GetForegroundWindow() == window;
+
+            if (rendererHasFocus &&
+                (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0)
+            {
+                POINT currentMousePosition{};
+
+                if (GetCursorPos(&currentMousePosition) == FALSE)
+                {
+                    const DWORD error = GetLastError();
+                    dx12::ThrowIfFailed(
+                        HRESULT_FROM_WIN32(error),
+                        "GetCursorPos"
+                    );
+                }
+
+                if (hasPreviousMousePosition)
+                {
+                    const LONG mouseDeltaX =
+                        currentMousePosition.x -
+                        previousMousePosition.x;
+
+                    const LONG mouseDeltaY =
+                        currentMousePosition.y -
+                        previousMousePosition.y;
+
+                    cameraState.yawRadians +=
+                        static_cast<float>(mouseDeltaX) *
+                        mouseRadiansPerPixel;
+
+                    cameraState.pitchRadians -=
+                        static_cast<float>(mouseDeltaY) *
+                        mouseRadiansPerPixel;
+
+                    if (cameraState.pitchRadians >
+                        maximumPitchRadians)
+                    {
+                        cameraState.pitchRadians =
+                            maximumPitchRadians;
+                    }
+                    else if (cameraState.pitchRadians <
+                        -maximumPitchRadians)
+                    {
+                        cameraState.pitchRadians =
+                            -maximumPitchRadians;
+                    }
+
+                    cameraState.yawRadians =
+                        DirectX::XMScalarModAngle(
+                            cameraState.yawRadians
+                        );
+                }
+
+                previousMousePosition = currentMousePosition;
+                hasPreviousMousePosition = true;
+            }
+            else
+            {
+                hasPreviousMousePosition = false;
+            }
+
+            const DirectX::XMMATRIX cameraRotation =
+                DirectX::XMMatrixRotationRollPitchYaw(
+                    cameraState.pitchRadians,
+                    cameraState.yawRadians,
+                    0.0F
+                );
+
+            const DirectX::XMVECTOR worldUp =
+                DirectX::XMVectorSet(
+                    0.0F,
+                    1.0F,
+                    0.0F,
+                    0.0F
+                );
+
+            const DirectX::XMVECTOR cameraForward =
+                DirectX::XMVector3Normalize(
+                    DirectX::XMVector3TransformNormal(
+                        DirectX::XMVectorSet(
+                            0.0F,
+                            0.0F,
+                            1.0F,
+                            0.0F
+                        ),
+                        cameraRotation
+                    )
+                );
+
+            const DirectX::XMVECTOR cameraRight =
+                DirectX::XMVector3Normalize(
+                    DirectX::XMVector3TransformNormal(
+                        DirectX::XMVectorSet(
+                            1.0F,
+                            0.0F,
+                            0.0F,
+                            0.0F
+                        ),
+                        cameraRotation
+                    )
+                );
+
+            DirectX::XMVECTOR cameraMovement =
+                DirectX::XMVectorZero();
+
+            if (rendererHasFocus)
+            {
+                if ((GetAsyncKeyState('W') & 0x8000) != 0)
+                {
+                    cameraMovement =
+                        DirectX::XMVectorAdd(
+                            cameraMovement,
+                            cameraForward
+                        );
+                }
+
+                if ((GetAsyncKeyState('S') & 0x8000) != 0)
+                {
+                    cameraMovement =
+                        DirectX::XMVectorSubtract(
+                            cameraMovement,
+                            cameraForward
+                        );
+                }
+
+                if ((GetAsyncKeyState('D') & 0x8000) != 0)
+                {
+                    cameraMovement =
+                        DirectX::XMVectorAdd(
+                            cameraMovement,
+                            cameraRight
+                        );
+                }
+
+                if ((GetAsyncKeyState('A') & 0x8000) != 0)
+                {
+                    cameraMovement =
+                        DirectX::XMVectorSubtract(
+                            cameraMovement,
+                            cameraRight
+                        );
+                }
+
+                if ((GetAsyncKeyState('E') & 0x8000) != 0)
+                {
+                    cameraMovement =
+                        DirectX::XMVectorAdd(
+                            cameraMovement,
+                            worldUp
+                        );
+                }
+
+                if ((GetAsyncKeyState('Q') & 0x8000) != 0)
+                {
+                    cameraMovement =
+                        DirectX::XMVectorSubtract(
+                            cameraMovement,
+                            worldUp
+                        );
+                }
+            }
+
+            if (DirectX::XMVectorGetX(
+                    DirectX::XMVector3LengthSq(cameraMovement)
+                ) > 0.0F)
+            {
+                cameraMovement =
+                    DirectX::XMVectorScale(
+                        DirectX::XMVector3Normalize(
+                            cameraMovement
+                        ),
+                        cameraMovementUnitsPerSecond *
+                        frameDeltaSeconds
+                    );
+
+                DirectX::XMVECTOR cameraPosition =
+                    DirectX::XMLoadFloat3(
+                        &cameraState.position
+                    );
+
+                cameraPosition =
+                    DirectX::XMVectorAdd(
+                        cameraPosition,
+                        cameraMovement
+                    );
+
+                DirectX::XMStoreFloat3(
+                    &cameraState.position,
+                    cameraPosition
+                );
+            }
+
+            triangleRotationRadians =
+                DirectX::XMScalarModAngle(
+                    triangleRotationRadians +
+                    rotationRadiansPerSecond *
+                    frameDeltaSeconds
+                );
+
+            const DirectX::XMMATRIX modelMatrix =
                 DirectX::XMMatrixRotationZ(
                     triangleRotationRadians
+                );
+
+            const DirectX::XMVECTOR cameraPosition =
+                DirectX::XMLoadFloat3(
+                    &cameraState.position
+                );
+
+            const DirectX::XMMATRIX viewMatrix =
+                DirectX::XMMatrixLookToLH(
+                    cameraPosition,
+                    cameraForward,
+                    worldUp
+                );
+
+            const float aspectRatio =
+                static_cast<float>(swapChainWidth) /
+                static_cast<float>(swapChainHeight);
+
+            const DirectX::XMMATRIX projectionMatrix =
+                DirectX::XMMatrixPerspectiveFovLH(
+                    DirectX::XMConvertToRadians(60.0F),
+                    aspectRatio,
+                    0.1F,
+                    100.0F
                 );
 
             TransformConstants transformConstants{};
 
             DirectX::XMStoreFloat4x4(
-                &transformConstants.transform,
-                transformMatrix
+                &transformConstants.model,
+                modelMatrix
+            );
+
+            DirectX::XMStoreFloat4x4(
+                &transformConstants.view,
+                viewMatrix
+            );
+
+            DirectX::XMStoreFloat4x4(
+                &transformConstants.projection,
+                projectionMatrix
             );
 
             std::memcpy(

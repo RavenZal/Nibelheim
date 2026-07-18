@@ -1,6 +1,8 @@
 cbuffer TransformConstants : register(b0)
 {
-    row_major float4x4 transform;
+    row_major float4x4 model;
+    row_major float4x4 view;
+    row_major float4x4 projection;
 };
 
 struct VertexShaderInput
@@ -22,8 +24,14 @@ VertexShaderOutput VSMain(VertexShaderInput input)
     const float4 localPosition =
         float4(input.position, 1.0f);
 
+    const float4 worldPosition =
+        mul(localPosition, model);
+
+    const float4 viewPosition =
+        mul(worldPosition, view);
+
     output.position =
-        mul(localPosition, transform);
+        mul(viewPosition, projection);
 
     output.color = input.color;
 
