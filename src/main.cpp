@@ -616,27 +616,45 @@ int main()
         << "Triangle root signature created successfully.\n";
 
         //Vertex Buffer
-        constexpr std::array<Vertex, 3> triangleVertices{{
+        // The near triangle is submitted first. The offset far triangle is
+        // submitted second, so their overlap visibly proves that depth testing
+        // wins over submission order.
+        constexpr std::array<Vertex, 6> triangleVertices{{
             {
-                {0.0f, 0.6f, 0.0f},
+                {0.0f, 0.6f, 0.25f},
                 {1.0f, 0.0f, 0.0f, 1.0f}
             },
             {
-                {0.6f, -0.6f, 0.0f},
+                {0.6f, -0.6f, 0.25f},
                 {0.0f, 1.0f, 0.0f, 1.0f}
             },
             {
-                {-0.6f, -0.6f, 0.0f},
+                {-0.6f, -0.6f, 0.25f},
                 {0.0f, 0.0f, 1.0f, 1.0f}
+            },
+            {
+                {0.25f, 0.45f, 0.75f},
+                {1.0f, 0.8f, 0.1f, 1.0f}
+            },
+            {
+                {0.85f, -0.45f, 0.75f},
+                {1.0f, 0.8f, 0.1f, 1.0f}
+            },
+            {
+                {-0.35f, -0.45f, 0.75f},
+                {1.0f, 0.8f, 0.1f, 1.0f}
             }
         }};
 
         // These values select entries in triangleVertices. The 16-bit CPU
         // element type must match DXGI_FORMAT_R16_UINT in the index view.
-        constexpr std::array<std::uint16_t, 3> triangleIndices{{
+        constexpr std::array<std::uint16_t, 6> triangleIndices{{
             0,
             1,
-            2
+            2,
+            3,
+            4,
+            5
         }};
 
         // Static geometry is copied once from a CPU-visible upload resource
@@ -1003,13 +1021,13 @@ int main()
         D3D12_DEPTH_STENCIL_DESC
             depthStencilDescription{};
 
-        depthStencilDescription.DepthEnable = FALSE;
+        depthStencilDescription.DepthEnable = TRUE;
 
         depthStencilDescription.DepthWriteMask =
-            D3D12_DEPTH_WRITE_MASK_ZERO;
+            D3D12_DEPTH_WRITE_MASK_ALL;
 
         depthStencilDescription.DepthFunc =
-            D3D12_COMPARISON_FUNC_ALWAYS;
+            D3D12_COMPARISON_FUNC_LESS;
 
         depthStencilDescription.StencilEnable = FALSE;
 
@@ -1069,7 +1087,7 @@ int main()
             DXGI_FORMAT_R8G8B8A8_UNORM;
 
         pipelineDescription.DSVFormat =
-            DXGI_FORMAT_UNKNOWN;
+            DXGI_FORMAT_D32_FLOAT;
 
         pipelineDescription.SampleDesc.Count = 1;
         pipelineDescription.SampleDesc.Quality = 0;
@@ -1267,6 +1285,135 @@ int main()
                 static_cast<SIZE_T>(rtvDescriptorSize);
         }
         std::cout << "RTV Create Success" << "\n";
+
+        // One CPU-only DSV descriptor is sufficient because this renderer uses
+        // one depth texture for the serial work submitted to the direct queue.
+        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDescription{};
+        dsvHeapDescription.Type =
+            D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        dsvHeapDescription.NumDescriptors = 1;
+        dsvHeapDescription.Flags =
+            D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        dsvHeapDescription.NodeMask = 0;
+
+        Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>
+            dsvHeap;
+
+        dx12::ThrowIfFailed(
+            device->CreateDescriptorHeap(
+                &dsvHeapDescription,
+                IID_PPV_ARGS(dsvHeap.GetAddressOf())
+            ),
+            "ID3D12Device::CreateDescriptorHeap for DSV"
+        );
+
+        dx12::ThrowIfFailed(
+            dsvHeap->SetName(L"Main DSV Heap"),
+            "ID3D12DescriptorHeap::SetName for DSV heap"
+        );
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE depthStencilView =
+            dsvHeap->GetCPUDescriptorHandleForHeapStart();
+
+        auto createDepthBuffer =
+            [&](UINT width, UINT height)
+            {
+                if (width == 0 || height == 0)
+                {
+                    throw std::runtime_error(
+                        "Depth-buffer dimensions must be positive."
+                    );
+                }
+
+                D3D12_HEAP_PROPERTIES depthHeapProperties{};
+                depthHeapProperties.Type =
+                    D3D12_HEAP_TYPE_DEFAULT;
+                depthHeapProperties.CPUPageProperty =
+                    D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+                depthHeapProperties.MemoryPoolPreference =
+                    D3D12_MEMORY_POOL_UNKNOWN;
+                depthHeapProperties.CreationNodeMask = 1;
+                depthHeapProperties.VisibleNodeMask = 1;
+
+                D3D12_RESOURCE_DESC depthBufferDescription{};
+                depthBufferDescription.Dimension =
+                    D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                depthBufferDescription.Alignment = 0;
+                depthBufferDescription.Width = width;
+                depthBufferDescription.Height = height;
+                depthBufferDescription.DepthOrArraySize = 1;
+                depthBufferDescription.MipLevels = 1;
+                depthBufferDescription.Format =
+                    DXGI_FORMAT_D32_FLOAT;
+                depthBufferDescription.SampleDesc.Count = 1;
+                depthBufferDescription.SampleDesc.Quality = 0;
+                depthBufferDescription.Layout =
+                    D3D12_TEXTURE_LAYOUT_UNKNOWN;
+                depthBufferDescription.Flags =
+                    D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+                D3D12_CLEAR_VALUE optimizedClearValue{};
+                optimizedClearValue.Format =
+                    DXGI_FORMAT_D32_FLOAT;
+                optimizedClearValue.DepthStencil.Depth = 1.0f;
+                optimizedClearValue.DepthStencil.Stencil = 0;
+
+                Microsoft::WRL::ComPtr<ID3D12Resource>
+                    createdDepthBuffer;
+
+                dx12::ThrowIfFailed(
+                    device->CreateCommittedResource(
+                        &depthHeapProperties,
+                        D3D12_HEAP_FLAG_NONE,
+                        &depthBufferDescription,
+                        D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                        &optimizedClearValue,
+                        IID_PPV_ARGS(
+                            createdDepthBuffer.GetAddressOf()
+                        )
+                    ),
+                    "ID3D12Device::CreateCommittedResource "
+                    "for depth buffer"
+                );
+
+                dx12::ThrowIfFailed(
+                    createdDepthBuffer->SetName(L"Main Depth Buffer"),
+                    "ID3D12Resource::SetName for depth buffer"
+                );
+
+                D3D12_DEPTH_STENCIL_VIEW_DESC
+                    depthStencilViewDescription{};
+                depthStencilViewDescription.Format =
+                    DXGI_FORMAT_D32_FLOAT;
+                depthStencilViewDescription.ViewDimension =
+                    D3D12_DSV_DIMENSION_TEXTURE2D;
+                depthStencilViewDescription.Flags =
+                    D3D12_DSV_FLAG_NONE;
+                depthStencilViewDescription.Texture2D.MipSlice = 0;
+
+                // CreateDepthStencilView returns void. The Debug Layer checks
+                // that the resource, format, and descriptor agree.
+                device->CreateDepthStencilView(
+                    createdDepthBuffer.Get(),
+                    &depthStencilViewDescription,
+                    depthStencilView
+                );
+
+                return createdDepthBuffer;
+            };
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> depthBuffer =
+            createDepthBuffer(
+                swapChainWidth,
+                swapChainHeight
+            );
+
+        std::cout
+            << "Depth buffer and DSV created: "
+            << swapChainWidth
+            << " x "
+            << swapChainHeight
+            << ", DXGI_FORMAT_D32_FLOAT.\n";
 
         // One transform Constant Buffer belongs to each swap-chain/back-buffer
         // slot. The CPU updates a slot only after that slot's Fence value has
@@ -1797,6 +1944,10 @@ int main()
                         backBuffer.Reset();
                     }
 
+                    // The queue drain above proves that no in-flight draw can
+                    // still reference the old-size depth texture.
+                    depthBuffer.Reset();
+
                     dx12::ThrowIfFailed(
                         _IDXGISwapChain3->ResizeBuffers(
                             swapChainBufferCount,
@@ -1851,6 +2002,14 @@ int main()
 
                     swapChainWidth = requestedWidth;
                     swapChainHeight = requestedHeight;
+
+                    // ResizeBuffers only recreates color back buffers. The
+                    // application must explicitly recreate its depth texture.
+                    depthBuffer = createDepthBuffer(
+                        swapChainWidth,
+                        swapChainHeight
+                    );
+
                     windowState.resizePending = false;
 
                     std::cout
@@ -2043,7 +2202,7 @@ int main()
                 1,
                 &currentBackBufferRtv,
                 FALSE,
-                nullptr
+                &depthStencilView
             );
 
             constexpr FLOAT clearColor[4] = {
@@ -2056,6 +2215,17 @@ int main()
             CommandList->ClearRenderTargetView(
                 currentBackBufferRtv,
                 clearColor,
+                0,
+                nullptr
+            );
+
+            // Clear 1.0 represents the farthest depth in the current normal-Z
+            // convention. Stencil is not present in DXGI_FORMAT_D32_FLOAT.
+            CommandList->ClearDepthStencilView(
+                depthStencilView,
+                D3D12_CLEAR_FLAG_DEPTH,
+                1.0f,
+                0,
                 0,
                 nullptr
             );
@@ -2094,7 +2264,7 @@ int main()
             );
 
             CommandList->DrawIndexedInstanced(
-                3,
+                static_cast<UINT>(triangleIndices.size()),
                 1,
                 0,
                 0,
@@ -2230,8 +2400,59 @@ int main()
         dx12::ThrowIfFailed(
             device.As(&infoQueue),
             "Query ID3D12InfoQueue from ID3D12Device");
+        const UINT64 storedMessageCount =
+            infoQueue->GetNumStoredMessages();
+
         std::cout << "Direct3D 12 Debug Layer stored messages: "
-                  << infoQueue->GetNumStoredMessages() << '\n';
+                  << storedMessageCount << '\n';
+
+        for (UINT64 messageIndex = 0;
+            messageIndex < storedMessageCount;
+            ++messageIndex)
+        {
+            SIZE_T messageByteCount = 0;
+            dx12::ThrowIfFailed(
+                infoQueue->GetMessage(
+                    messageIndex,
+                    nullptr,
+                    &messageByteCount
+                ),
+                "ID3D12InfoQueue::GetMessage size query"
+            );
+
+            const SIZE_T alignedElementCount =
+                (messageByteCount + sizeof(std::max_align_t) - 1) /
+                sizeof(std::max_align_t);
+
+            std::vector<std::max_align_t> messageStorage(
+                alignedElementCount
+            );
+
+            auto* debugMessage =
+                reinterpret_cast<D3D12_MESSAGE*>(
+                    messageStorage.data()
+                );
+
+            dx12::ThrowIfFailed(
+                infoQueue->GetMessage(
+                    messageIndex,
+                    debugMessage,
+                    &messageByteCount
+                ),
+                "ID3D12InfoQueue::GetMessage"
+            );
+
+            std::cout
+                << "  ["
+                << messageIndex
+                << "] severity="
+                << static_cast<int>(debugMessage->Severity)
+                << ", id="
+                << static_cast<int>(debugMessage->ID)
+                << ": "
+                << debugMessage->pDescription
+                << '\n';
+        }
 #endif
 
         return static_cast<int>(message.wParam);
