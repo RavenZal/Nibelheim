@@ -139,12 +139,34 @@ struct CameraState final
 struct Vertex
 {
     float position[3];
-    float color[4];
+    float normal[3];
+    float textureCoordinates[2];
+    float tangent[4];
 };
 
 static_assert(
-    sizeof(Vertex) == sizeof(float) * 7,
-    "Vertex must contain exactly seven floats."
+    sizeof(Vertex) == sizeof(float) * 12,
+    "Vertex must contain exactly twelve floats."
+);
+
+static_assert(
+    offsetof(Vertex, position) == 0,
+    "Vertex position must begin at byte offset 0."
+);
+
+static_assert(
+    offsetof(Vertex, normal) == sizeof(float) * 3,
+    "Vertex normal must begin at byte offset 12."
+);
+
+static_assert(
+    offsetof(Vertex, textureCoordinates) == sizeof(float) * 6,
+    "Vertex texture coordinates must begin at byte offset 24."
+);
+
+static_assert(
+    offsetof(Vertex, tangent) == sizeof(float) * 8,
+    "Vertex tangent must begin at byte offset 32."
 );
 
 struct TransformConstants final
@@ -632,27 +654,39 @@ int main()
         constexpr std::array<Vertex, 6> triangleVertices{{
             {
                 {0.0f, 0.6f, 0.25f},
+                {0.0f, 0.0f, -1.0f},
+                {0.5f, 0.0f},
                 {1.0f, 0.0f, 0.0f, 1.0f}
             },
             {
                 {0.6f, -0.6f, 0.25f},
-                {0.0f, 1.0f, 0.0f, 1.0f}
+                {0.0f, 0.0f, -1.0f},
+                {1.0f, 1.0f},
+                {1.0f, 0.0f, 0.0f, 1.0f}
             },
             {
                 {-0.6f, -0.6f, 0.25f},
-                {0.0f, 0.0f, 1.0f, 1.0f}
+                {0.0f, 0.0f, -1.0f},
+                {0.0f, 1.0f},
+                {1.0f, 0.0f, 0.0f, 1.0f}
             },
             {
                 {0.25f, 0.45f, 0.75f},
-                {1.0f, 0.8f, 0.1f, 1.0f}
+                {0.0f, 0.0f, -1.0f},
+                {0.5f, 0.0f},
+                {1.0f, 0.0f, 0.0f, 1.0f}
             },
             {
                 {0.85f, -0.45f, 0.75f},
-                {1.0f, 0.8f, 0.1f, 1.0f}
+                {0.0f, 0.0f, -1.0f},
+                {1.0f, 1.0f},
+                {1.0f, 0.0f, 0.0f, 1.0f}
             },
             {
                 {-0.35f, -0.45f, 0.75f},
-                {1.0f, 0.8f, 0.1f, 1.0f}
+                {0.0f, 0.0f, -1.0f},
+                {0.0f, 1.0f},
+                {1.0f, 0.0f, 0.0f, 1.0f}
             }
         }};
 
@@ -953,23 +987,43 @@ int main()
 
         constexpr std::array<
             D3D12_INPUT_ELEMENT_DESC,
-            2
+            4
         > triangleInputElements{{
             {
                 "POSITION",
                 0,
                 DXGI_FORMAT_R32G32B32_FLOAT,
                 0,
-                0,
+                static_cast<UINT>(offsetof(Vertex, position)),
                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
                 0
             },
             {
-                "COLOR",
+                "NORMAL",
+                0,
+                DXGI_FORMAT_R32G32B32_FLOAT,
+                0,
+                static_cast<UINT>(offsetof(Vertex, normal)),
+                D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+                0
+            },
+            {
+                "TEXCOORD",
+                0,
+                DXGI_FORMAT_R32G32_FLOAT,
+                0,
+                static_cast<UINT>(
+                    offsetof(Vertex, textureCoordinates)
+                ),
+                D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+                0
+            },
+            {
+                "TANGENT",
                 0,
                 DXGI_FORMAT_R32G32B32A32_FLOAT,
                 0,
-                12,
+                static_cast<UINT>(offsetof(Vertex, tangent)),
                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
                 0
             }
@@ -2520,7 +2574,7 @@ int main()
             );
 
             // The index view supplies vertex numbers; the vertex view above
-            // still supplies the POSITION and COLOR data for those numbers.
+            // supplies POSITION, NORMAL, TEXCOORD, and TANGENT data for them.
             CommandList->IASetIndexBuffer(
                 &triangleIndexBufferView
             );
