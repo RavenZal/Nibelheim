@@ -561,10 +561,23 @@ int main()
             .BytecodeLength = pixelShaderBytes.size()
         };
 
-        // Root parameter 0 supplies one Constant Buffer View to vertex-shader
-        // register b0. It is a root descriptor, so this milestone does not
-        // require a shader-visible CBV/SRV/UAV descriptor heap.
-        D3D12_ROOT_PARAMETER transformRootParameter{};
+        // Root parameter 0 keeps the per-frame transform CBV at b0. Root
+        // parameter 1 is a descriptor table whose single SRV is visible as t0
+        // in the pixel shader. The descriptor range must remain alive until
+        // the root signature has been serialized below.
+        D3D12_DESCRIPTOR_RANGE baseColorTextureRange{};
+        baseColorTextureRange.RangeType =
+            D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        baseColorTextureRange.NumDescriptors = 1;
+        baseColorTextureRange.BaseShaderRegister = 0;
+        baseColorTextureRange.RegisterSpace = 0;
+        baseColorTextureRange.OffsetInDescriptorsFromTableStart =
+            D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+        std::array<D3D12_ROOT_PARAMETER, 2> rootParameters{};
+
+        D3D12_ROOT_PARAMETER& transformRootParameter =
+            rootParameters[0];
 
         transformRootParameter.ParameterType =
             D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -575,14 +588,46 @@ int main()
         transformRootParameter.ShaderVisibility =
             D3D12_SHADER_VISIBILITY_VERTEX;
 
+        D3D12_ROOT_PARAMETER& baseColorTextureRootParameter =
+            rootParameters[1];
+
+        baseColorTextureRootParameter.ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        baseColorTextureRootParameter.DescriptorTable.NumDescriptorRanges = 1;
+        baseColorTextureRootParameter.DescriptorTable.pDescriptorRanges =
+            &baseColorTextureRange;
+        baseColorTextureRootParameter.ShaderVisibility =
+            D3D12_SHADER_VISIBILITY_PIXEL;
+
+        // A static sampler is embedded in the root signature because this
+        // first texture uses one fixed sampling policy. No separate sampler
+        // descriptor heap is required for it.
+        D3D12_STATIC_SAMPLER_DESC baseColorSampler{};
+        baseColorSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+        baseColorSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        baseColorSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        baseColorSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        baseColorSampler.MipLODBias = 0.0f;
+        baseColorSampler.MaxAnisotropy = 1;
+        baseColorSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        baseColorSampler.BorderColor =
+            D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+        baseColorSampler.MinLOD = 0.0f;
+        baseColorSampler.MaxLOD = D3D12_FLOAT32_MAX;
+        baseColorSampler.ShaderRegister = 0;
+        baseColorSampler.RegisterSpace = 0;
+        baseColorSampler.ShaderVisibility =
+            D3D12_SHADER_VISIBILITY_PIXEL;
+
         D3D12_ROOT_SIGNATURE_DESC rootSignatureDescription{};
 
-        rootSignatureDescription.NumParameters = 1;
+        rootSignatureDescription.NumParameters =
+            static_cast<UINT>(rootParameters.size());
         rootSignatureDescription.pParameters =
-            &transformRootParameter;
+            rootParameters.data();
 
-        rootSignatureDescription.NumStaticSamplers = 0;
-        rootSignatureDescription.pStaticSamplers = nullptr;
+        rootSignatureDescription.NumStaticSamplers = 1;
+        rootSignatureDescription.pStaticSamplers = &baseColorSampler;
 
         rootSignatureDescription.Flags =
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -871,6 +916,160 @@ int main()
             "for triangle index upload buffer"
         );
 
+        // This small procedural checkerboard keeps the first texture milestone
+        // focused on the DirectX 12 upload and binding path instead of adding
+        // an image-file decoder. Its bytes represent sRGB base-color values.
+        constexpr UINT baseColorTextureWidth = 4;
+        constexpr UINT baseColorTextureHeight = 4;
+        constexpr UINT baseColorTextureBytesPerPixel = 4;
+        constexpr UINT baseColorTextureSourceRowSize =
+            baseColorTextureWidth * baseColorTextureBytesPerPixel;
+
+        constexpr auto baseColorTexturePixels = []
+        {
+            std::array<std::uint8_t, 4 * 4 * 4> pixels{};
+
+            for (std::size_t y = 0; y < 4; ++y)
+            {
+                for (std::size_t x = 0; x < 4; ++x)
+                {
+                    const bool useOrange = ((x + y) % 2) == 0;
+                    const std::size_t pixelOffset = (y * 4 + x) * 4;
+
+                    pixels[pixelOffset + 0] =
+                        useOrange ? std::uint8_t{255} : std::uint8_t{20};
+                    pixels[pixelOffset + 1] =
+                        useOrange ? std::uint8_t{96} : std::uint8_t{190};
+                    pixels[pixelOffset + 2] =
+                        useOrange ? std::uint8_t{24} : std::uint8_t{255};
+                    pixels[pixelOffset + 3] = std::uint8_t{255};
+                }
+            }
+
+            return pixels;
+        }();
+
+        D3D12_RESOURCE_DESC baseColorTextureDescription{};
+        baseColorTextureDescription.Dimension =
+            D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        baseColorTextureDescription.Alignment = 0;
+        baseColorTextureDescription.Width = baseColorTextureWidth;
+        baseColorTextureDescription.Height = baseColorTextureHeight;
+        baseColorTextureDescription.DepthOrArraySize = 1;
+        baseColorTextureDescription.MipLevels = 1;
+        baseColorTextureDescription.Format =
+            DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        baseColorTextureDescription.SampleDesc.Count = 1;
+        baseColorTextureDescription.SampleDesc.Quality = 0;
+        baseColorTextureDescription.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        baseColorTextureDescription.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> baseColorTexture;
+        dx12::ThrowIfFailed(
+            device->CreateCommittedResource(
+                &vertexDefaultHeapProperties,
+                D3D12_HEAP_FLAG_NONE,
+                &baseColorTextureDescription,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr,
+                IID_PPV_ARGS(baseColorTexture.GetAddressOf())
+            ),
+            "ID3D12Device::CreateCommittedResource for base-color texture"
+        );
+
+        dx12::ThrowIfFailed(
+            baseColorTexture->SetName(L"Checkerboard Base Color Texture"),
+            "ID3D12Resource::SetName for base-color texture"
+        );
+
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT baseColorUploadFootprint{};
+        UINT baseColorUploadRowCount = 0;
+        UINT64 baseColorUploadRowSize = 0;
+        UINT64 baseColorUploadBufferSize = 0;
+
+        device->GetCopyableFootprints(
+            &baseColorTextureDescription,
+            0,
+            1,
+            0,
+            &baseColorUploadFootprint,
+            &baseColorUploadRowCount,
+            &baseColorUploadRowSize,
+            &baseColorUploadBufferSize
+        );
+
+        if (baseColorUploadRowCount != baseColorTextureHeight ||
+            baseColorUploadRowSize != baseColorTextureSourceRowSize)
+        {
+            throw std::runtime_error(
+                "Unexpected copyable footprint for the base-color texture."
+            );
+        }
+
+        D3D12_RESOURCE_DESC baseColorUploadBufferDescription =
+            vertexBufferDescription;
+        baseColorUploadBufferDescription.Width = baseColorUploadBufferSize;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> baseColorTextureUploadBuffer;
+        dx12::ThrowIfFailed(
+            device->CreateCommittedResource(
+                &vertexUploadHeapProperties,
+                D3D12_HEAP_FLAG_NONE,
+                &baseColorUploadBufferDescription,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+                nullptr,
+                IID_PPV_ARGS(baseColorTextureUploadBuffer.GetAddressOf())
+            ),
+            "ID3D12Device::CreateCommittedResource for texture upload buffer"
+        );
+
+        dx12::ThrowIfFailed(
+            baseColorTextureUploadBuffer->SetName(
+                L"Checkerboard Base Color Upload Buffer"
+            ),
+            "ID3D12Resource::SetName for texture upload buffer"
+        );
+
+        D3D12_DESCRIPTOR_HEAP_DESC baseColorSrvHeapDescription{};
+        baseColorSrvHeapDescription.Type =
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        baseColorSrvHeapDescription.NumDescriptors = 1;
+        baseColorSrvHeapDescription.Flags =
+            D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        baseColorSrvHeapDescription.NodeMask = 0;
+
+        Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> baseColorSrvHeap;
+        dx12::ThrowIfFailed(
+            device->CreateDescriptorHeap(
+                &baseColorSrvHeapDescription,
+                IID_PPV_ARGS(baseColorSrvHeap.GetAddressOf())
+            ),
+            "ID3D12Device::CreateDescriptorHeap for base-color SRV"
+        );
+
+        dx12::ThrowIfFailed(
+            baseColorSrvHeap->SetName(L"Base Color SRV Heap"),
+            "ID3D12DescriptorHeap::SetName for base-color SRV heap"
+        );
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC baseColorSrvDescription{};
+        baseColorSrvDescription.Format =
+            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        baseColorSrvDescription.ViewDimension =
+            D3D12_SRV_DIMENSION_TEXTURE2D;
+        baseColorSrvDescription.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        baseColorSrvDescription.Texture2D.MostDetailedMip = 0;
+        baseColorSrvDescription.Texture2D.MipLevels = 1;
+        baseColorSrvDescription.Texture2D.PlaneSlice = 0;
+        baseColorSrvDescription.Texture2D.ResourceMinLODClamp = 0.0f;
+
+        device->CreateShaderResourceView(
+            baseColorTexture.Get(),
+            &baseColorSrvDescription,
+            baseColorSrvHeap->GetCPUDescriptorHandleForHeapStart()
+        );
+
         // Copy the CPU vertex array into the temporary upload resource. The
         // GPU copy into triangleVertexBuffer is recorded after the main
         // graphics command list is created.
@@ -946,6 +1145,69 @@ int main()
             0,
             &indexWrittenRange
         );
+
+        // Texture upload rows must use the device-provided RowPitch, which is
+        // aligned more strictly than the tightly packed 16-byte source rows.
+        void* mappedTextureData = nullptr;
+        dx12::ThrowIfFailed(
+            baseColorTextureUploadBuffer->Map(
+                0,
+                &noCpuReads,
+                &mappedTextureData
+            ),
+            "ID3D12Resource::Map for texture upload buffer"
+        );
+
+        if (mappedTextureData == nullptr)
+        {
+            throw std::runtime_error(
+                "Texture upload buffer mapping returned a null pointer."
+            );
+        }
+
+        auto* const textureUploadBytes =
+            static_cast<std::uint8_t*>(mappedTextureData) +
+            baseColorUploadFootprint.Offset;
+
+        for (UINT row = 0; row < baseColorUploadRowCount; ++row)
+        {
+            std::memcpy(
+                textureUploadBytes +
+                    static_cast<std::size_t>(row) *
+                    baseColorUploadFootprint.Footprint.RowPitch,
+                baseColorTexturePixels.data() +
+                    static_cast<std::size_t>(row) *
+                    baseColorTextureSourceRowSize,
+                baseColorTextureSourceRowSize
+            );
+        }
+
+        const SIZE_T textureUploadWrittenEnd =
+            static_cast<SIZE_T>(baseColorUploadFootprint.Offset) +
+            static_cast<SIZE_T>(baseColorUploadRowCount - 1U) *
+            baseColorUploadFootprint.Footprint.RowPitch +
+            baseColorTextureSourceRowSize;
+
+        D3D12_RANGE textureUploadWrittenRange{
+            .Begin = static_cast<SIZE_T>(baseColorUploadFootprint.Offset),
+            .End = textureUploadWrittenEnd
+        };
+
+        baseColorTextureUploadBuffer->Unmap(
+            0,
+            &textureUploadWrittenRange
+        );
+
+        std::cout
+            << "Checkerboard texture resources created: "
+            << baseColorTextureWidth
+            << " x "
+            << baseColorTextureHeight
+            << ", source row "
+            << baseColorTextureSourceRowSize
+            << " bytes, upload row pitch "
+            << baseColorUploadFootprint.Footprint.RowPitch
+            << " bytes.\n";
         
             //explain buffer
         D3D12_VERTEX_BUFFER_VIEW
@@ -1719,13 +1981,56 @@ int main()
             &indexBufferReadyBarrier
         );
 
+        D3D12_TEXTURE_COPY_LOCATION baseColorCopyDestination{};
+        baseColorCopyDestination.pResource = baseColorTexture.Get();
+        baseColorCopyDestination.Type =
+            D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        baseColorCopyDestination.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION baseColorCopySource{};
+        baseColorCopySource.pResource =
+            baseColorTextureUploadBuffer.Get();
+        baseColorCopySource.Type =
+            D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        baseColorCopySource.PlacedFootprint =
+            baseColorUploadFootprint;
+
+        CommandList->CopyTextureRegion(
+            &baseColorCopyDestination,
+            0,
+            0,
+            0,
+            &baseColorCopySource,
+            nullptr
+        );
+
+        D3D12_RESOURCE_BARRIER baseColorTextureReadyBarrier{};
+        baseColorTextureReadyBarrier.Type =
+            D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        baseColorTextureReadyBarrier.Flags =
+            D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        baseColorTextureReadyBarrier.Transition.pResource =
+            baseColorTexture.Get();
+        baseColorTextureReadyBarrier.Transition.Subresource =
+            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        baseColorTextureReadyBarrier.Transition.StateBefore =
+            D3D12_RESOURCE_STATE_COPY_DEST;
+        baseColorTextureReadyBarrier.Transition.StateAfter =
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        CommandList->ResourceBarrier(
+            1,
+            &baseColorTextureReadyBarrier
+        );
+
         dx12::ThrowIfFailed(
             CommandList->Close(),
-            "Close vertex upload command list"
+            "Close static-resource upload command list"
         );
 
         std::cout
-            << "Vertex-buffer copy and state transition recorded.\n";
+            << "Vertex, index, and texture copies plus state transitions "
+            << "recorded.\n";
 
         
 
@@ -1769,10 +2074,9 @@ int main()
             );
         }
 
-        // Submit the one-time vertex upload before rendering begins. The
-        // upload buffer cannot be released merely because ExecuteCommandLists
-        // returned; the GPU consumes it asynchronously. Signal and wait for a
-        // dedicated initialization milestone before releasing that resource.
+        // Submit the one-time static-resource uploads before rendering begins.
+        // Their upload buffers cannot be released merely because
+        // ExecuteCommandLists returned; the GPU consumes them asynchronously.
         ID3D12CommandList* const vertexUploadCommandLists[] = {
             CommandList.Get()
         };
@@ -1848,15 +2152,16 @@ int main()
             }
         }
 
-        // This Fence covers both copies recorded in the initialization command
-        // list, so both temporary upload resources are now safe to release.
+        // This Fence covers every copy recorded in the initialization command
+        // list, so all temporary upload resources are now safe to release.
         triangleVertexUploadBuffer.Reset();
         triangleIndexUploadBuffer.Reset();
+        baseColorTextureUploadBuffer.Reset();
 
         std::cout
-            << "Triangle vertex upload completed at Fence value "
+            << "Static geometry and texture uploads completed at Fence value "
             << vertexUploadFenceValue
-            << "; the temporary upload buffer was released.\n";
+            << "; temporary upload buffers were released.\n";
 
         //window
         //ShowWindow             
@@ -2546,6 +2851,17 @@ int main()
                 nullptr
             );
 
+            // Descriptor tables contain GPU descriptor handles, so their heap
+            // must be shader-visible and bound before setting root parameter 1.
+            ID3D12DescriptorHeap* const shaderVisibleDescriptorHeaps[] = {
+                baseColorSrvHeap.Get()
+            };
+
+            CommandList->SetDescriptorHeaps(
+                1,
+                shaderVisibleDescriptorHeaps
+            );
+
             CommandList->SetGraphicsRootSignature(
                 rootSignature.Get()
             );
@@ -2561,6 +2877,12 @@ int main()
                 transformConstantBuffers[
                     currentBackBufferIndex
                 ]->GetGPUVirtualAddress()
+            );
+
+            // Root parameter 1 is the one-SRV table mapped to pixel-shader t0.
+            CommandList->SetGraphicsRootDescriptorTable(
+                1,
+                baseColorSrvHeap->GetGPUDescriptorHandleForHeapStart()
             );
 
             CommandList->IASetPrimitiveTopology(

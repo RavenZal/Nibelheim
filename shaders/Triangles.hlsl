@@ -5,6 +5,9 @@ cbuffer TransformConstants : register(b0)
     row_major float4x4 projection;
 };
 
+Texture2D<float4> baseColorTexture : register(t0);
+SamplerState baseColorSampler : register(s0);
+
 struct VertexShaderInput
 {
     float3 position : POSITION;
@@ -46,10 +49,14 @@ VertexShaderOutput VSMain(VertexShaderInput input)
 
 float4 PSMain(VertexShaderOutput input) : SV_Target0
 {
-    // Until textures and lighting are introduced, this diagnostic color makes
-    // the new vertex attributes observable. Red and green show the UV axes;
-    // blue combines every normal and tangent component so DXC retains and the
-    // GPU consumes all four input-layout elements.
+    const float4 sampledBaseColor = baseColorTexture.Sample(
+        baseColorSampler,
+        input.textureCoordinates
+    );
+
+    // Normal and tangent lighting comes later. For now, preserve consumption
+    // of every expanded vertex attribute in the render-target alpha channel;
+    // blending is disabled, so this does not alter the visible texture color.
     const float3 encodedNormal = input.normal * 0.5f + 0.5f;
     const float3 encodedTangent = input.tangent.xyz * 0.5f + 0.5f;
 
@@ -63,10 +70,9 @@ float4 PSMain(VertexShaderOutput input) : SV_Target0
         float3(0.4f, 0.35f, 0.25f)
     ) + 0.5f * (input.tangent.w * 0.5f + 0.5f);
 
-    return float4(
-        saturate(input.textureCoordinates.x),
-        saturate(input.textureCoordinates.y),
-        saturate(0.5f * normalCheck + 0.5f * tangentCheck),
-        1.0f
+    const float attributeCheck = saturate(
+        0.5f * normalCheck + 0.5f * tangentCheck
     );
+
+    return float4(sampledBaseColor.rgb, attributeCheck);
 }
