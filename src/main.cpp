@@ -1,4 +1,6 @@
 #include "HResult.h"
+#include "GltfLoader.h"
+#include "WicImageLoader.h"
 
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -8,12 +10,14 @@
 #include <dxgi1_4.h>
 #include <DirectXMath.h>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <limits>
 
 #include <array>
 
@@ -41,6 +45,40 @@ struct CameraState final
     DirectX::XMFLOAT3 position{0.0f, 0.0f, -3.0f};
     float yawRadians = 0.0f;
     float pitchRadians = 0.0f;
+};
+
+struct PbrConstants final
+{
+    DirectX::XMFLOAT4 baseColorFactor;
+    DirectX::XMFLOAT3 cameraWorldPosition;
+    float metallicFactor = 1.0F;
+    DirectX::XMFLOAT3 directionalLightDirection;
+    float roughnessFactor = 1.0F;
+    DirectX::XMFLOAT3 directionalLightColor;
+    float normalScale = 1.0F;
+    float directionalLightIntensity = 1.0F;
+    float ambientIntensity = 0.03F;
+    float modelHandedness = 1.0F;
+    float padding = 0.0F;
+};
+
+static_assert(
+    sizeof(PbrConstants) == sizeof(float) * 20,
+    "PBR root constants must contain exactly twenty 32-bit values."
+);
+
+struct MaterialTextureUpload final
+{
+    dx12::DecodedImage image;
+    DXGI_FORMAT srvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    std::wstring resourceName;
+    std::wstring uploadName;
+    Microsoft::WRL::ComPtr<ID3D12Resource> texture;
+    Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT rowCount = 0;
+    UINT64 rowSize = 0;
+    UINT64 uploadBufferSize = 0;
 };
 
 //file
@@ -136,49 +174,17 @@ struct CameraState final
     return fileBytes;
 }
 
-struct Vertex
-{
-    float position[3];
-    float normal[3];
-    float textureCoordinates[2];
-    float tangent[4];
-};
-
-static_assert(
-    sizeof(Vertex) == sizeof(float) * 12,
-    "Vertex must contain exactly twelve floats."
-);
-
-static_assert(
-    offsetof(Vertex, position) == 0,
-    "Vertex position must begin at byte offset 0."
-);
-
-static_assert(
-    offsetof(Vertex, normal) == sizeof(float) * 3,
-    "Vertex normal must begin at byte offset 12."
-);
-
-static_assert(
-    offsetof(Vertex, textureCoordinates) == sizeof(float) * 6,
-    "Vertex texture coordinates must begin at byte offset 24."
-);
-
-static_assert(
-    offsetof(Vertex, tangent) == sizeof(float) * 8,
-    "Vertex tangent must begin at byte offset 32."
-);
-
 struct TransformConstants final
 {
     DirectX::XMFLOAT4X4 model;
     DirectX::XMFLOAT4X4 view;
     DirectX::XMFLOAT4X4 projection;
+    DirectX::XMFLOAT4X4 normalMatrix;
 };
 
 static_assert(
-    sizeof(TransformConstants) == sizeof(float) * 48,
-    "TransformConstants must contain exactly three 4x4 float matrices."
+    sizeof(TransformConstants) == sizeof(float) * 64,
+    "TransformConstants must contain exactly four 4x4 float matrices."
 );
 
 constexpr UINT constantBufferAlignment =
@@ -562,19 +568,19 @@ int main()
         };
 
         // Root parameter 0 keeps the per-frame transform CBV at b0. Root
-        // parameter 1 is a descriptor table whose single SRV is visible as t0
-        // in the pixel shader. The descriptor range must remain alive until
-        // the root signature has been serialized below.
-        D3D12_DESCRIPTOR_RANGE baseColorTextureRange{};
-        baseColorTextureRange.RangeType =
+        // parameter 1 exposes one contiguous three-SRV table at t0-t2. Root
+        // parameter 2 supplies twenty 32-bit PBR values at b1 without a
+        // separate constant-buffer allocation.
+        D3D12_DESCRIPTOR_RANGE materialTextureRange{};
+        materialTextureRange.RangeType =
             D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        baseColorTextureRange.NumDescriptors = 1;
-        baseColorTextureRange.BaseShaderRegister = 0;
-        baseColorTextureRange.RegisterSpace = 0;
-        baseColorTextureRange.OffsetInDescriptorsFromTableStart =
+        materialTextureRange.NumDescriptors = 3;
+        materialTextureRange.BaseShaderRegister = 0;
+        materialTextureRange.RegisterSpace = 0;
+        materialTextureRange.OffsetInDescriptorsFromTableStart =
             D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-        std::array<D3D12_ROOT_PARAMETER, 2> rootParameters{};
+        std::array<D3D12_ROOT_PARAMETER, 3> rootParameters{};
 
         D3D12_ROOT_PARAMETER& transformRootParameter =
             rootParameters[0];
@@ -588,35 +594,48 @@ int main()
         transformRootParameter.ShaderVisibility =
             D3D12_SHADER_VISIBILITY_VERTEX;
 
-        D3D12_ROOT_PARAMETER& baseColorTextureRootParameter =
+        D3D12_ROOT_PARAMETER& materialTextureRootParameter =
             rootParameters[1];
 
-        baseColorTextureRootParameter.ParameterType =
+        materialTextureRootParameter.ParameterType =
             D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        baseColorTextureRootParameter.DescriptorTable.NumDescriptorRanges = 1;
-        baseColorTextureRootParameter.DescriptorTable.pDescriptorRanges =
-            &baseColorTextureRange;
-        baseColorTextureRootParameter.ShaderVisibility =
+        materialTextureRootParameter.DescriptorTable.NumDescriptorRanges = 1;
+        materialTextureRootParameter.DescriptorTable.pDescriptorRanges =
+            &materialTextureRange;
+        materialTextureRootParameter.ShaderVisibility =
             D3D12_SHADER_VISIBILITY_PIXEL;
 
-        // A static sampler is embedded in the root signature because this
-        // first texture uses one fixed sampling policy. No separate sampler
-        // descriptor heap is required for it.
-        D3D12_STATIC_SAMPLER_DESC baseColorSampler{};
-        baseColorSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-        baseColorSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        baseColorSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        baseColorSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        baseColorSampler.MipLODBias = 0.0f;
-        baseColorSampler.MaxAnisotropy = 1;
-        baseColorSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-        baseColorSampler.BorderColor =
+        D3D12_ROOT_PARAMETER& materialConstantsRootParameter =
+            rootParameters[2];
+        materialConstantsRootParameter.ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        materialConstantsRootParameter.Constants.ShaderRegister = 1;
+        materialConstantsRootParameter.Constants.RegisterSpace = 0;
+        materialConstantsRootParameter.Constants.Num32BitValues = 20;
+        // The pixel shader consumes the Material, camera, and light values.
+        // The vertex shader consumes modelHandedness so mirrored node
+        // transforms preserve the tangent frame orientation.
+        materialConstantsRootParameter.ShaderVisibility =
+            D3D12_SHADER_VISIBILITY_ALL;
+
+        // A static sampler is embedded in the root signature because the
+        // current three-texture Material table uses one fixed sampling policy.
+        // No separate sampler descriptor heap is required for it.
+        D3D12_STATIC_SAMPLER_DESC materialSampler{};
+        materialSampler.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        materialSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        materialSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        materialSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        materialSampler.MipLODBias = 0.0f;
+        materialSampler.MaxAnisotropy = 1;
+        materialSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        materialSampler.BorderColor =
             D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-        baseColorSampler.MinLOD = 0.0f;
-        baseColorSampler.MaxLOD = D3D12_FLOAT32_MAX;
-        baseColorSampler.ShaderRegister = 0;
-        baseColorSampler.RegisterSpace = 0;
-        baseColorSampler.ShaderVisibility =
+        materialSampler.MinLOD = 0.0f;
+        materialSampler.MaxLOD = D3D12_FLOAT32_MAX;
+        materialSampler.ShaderRegister = 0;
+        materialSampler.RegisterSpace = 0;
+        materialSampler.ShaderVisibility =
             D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rootSignatureDescription{};
@@ -627,7 +646,7 @@ int main()
             rootParameters.data();
 
         rootSignatureDescription.NumStaticSamplers = 1;
-        rootSignatureDescription.pStaticSamplers = &baseColorSampler;
+        rootSignatureDescription.pStaticSamplers = &materialSampler;
 
         rootSignatureDescription.Flags =
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -692,59 +711,130 @@ int main()
         std::cout
         << "Triangle root signature created successfully.\n";
 
-        //Vertex Buffer
-        // The near triangle is submitted first. The offset far triangle is
-        // submitted second, so their overlap visibly proves that depth testing
-        // wins over submission order.
-        constexpr std::array<Vertex, 6> triangleVertices{{
-            {
-                {0.0f, 0.6f, 0.25f},
-                {0.0f, 0.0f, -1.0f},
-                {0.5f, 0.0f},
-                {1.0f, 0.0f, 0.0f, 1.0f}
-            },
-            {
-                {0.6f, -0.6f, 0.25f},
-                {0.0f, 0.0f, -1.0f},
-                {1.0f, 1.0f},
-                {1.0f, 0.0f, 0.0f, 1.0f}
-            },
-            {
-                {-0.6f, -0.6f, 0.25f},
-                {0.0f, 0.0f, -1.0f},
-                {0.0f, 1.0f},
-                {1.0f, 0.0f, 0.0f, 1.0f}
-            },
-            {
-                {0.25f, 0.45f, 0.75f},
-                {0.0f, 0.0f, -1.0f},
-                {0.5f, 0.0f},
-                {1.0f, 0.0f, 0.0f, 1.0f}
-            },
-            {
-                {0.85f, -0.45f, 0.75f},
-                {0.0f, 0.0f, -1.0f},
-                {1.0f, 1.0f},
-                {1.0f, 0.0f, 0.0f, 1.0f}
-            },
-            {
-                {-0.35f, -0.45f, 0.75f},
-                {0.0f, 0.0f, -1.0f},
-                {0.0f, 1.0f},
-                {1.0f, 0.0f, 0.0f, 1.0f}
-            }
-        }};
+        // Load one deliberately constrained glTF 2.0 static mesh. The loader
+        // produces the same 48-byte vertex layout already verified by the
+        // previous milestone and normalizes indices to 32-bit values.
+        const std::filesystem::path staticMeshPath =
+            GetExecutableDirectory() /
+            "assets" /
+            "models" /
+            "learning_cube.gltf";
 
-        // These values select entries in triangleVertices. The 16-bit CPU
-        // element type must match DXGI_FORMAT_R16_UINT in the index view.
-        constexpr std::array<std::uint16_t, 6> triangleIndices{{
-            0,
-            1,
-            2,
-            3,
-            4,
-            5
-        }};
+        dx12::StaticModelData staticModel =
+            dx12::LoadStaticGltfModel(staticMeshPath);
+        const dx12::MeshData& staticMesh = staticModel.mesh;
+
+        if (staticMesh.vertices.size() >
+                std::numeric_limits<UINT>::max() / sizeof(dx12::Vertex) ||
+            staticMesh.indices.size() >
+                std::numeric_limits<UINT>::max() / sizeof(std::uint32_t))
+        {
+            throw std::runtime_error(
+                "The loaded static glTF mesh is too large for a D3D12 "
+                "buffer view."
+            );
+        }
+
+        std::cout
+            << "Static glTF mesh loaded: "
+            << staticMeshPath.string()
+            << ", "
+            << staticMesh.vertices.size()
+            << " vertices, "
+            << staticMesh.indices.size()
+            << " indices.\n";
+
+        dx12::StaticMaterialData& staticMaterial =
+            staticModel.material;
+        std::cout
+            << "Static glTF material factors: baseColor=("
+            << staticMaterial.baseColorFactor.x << ", "
+            << staticMaterial.baseColorFactor.y << ", "
+            << staticMaterial.baseColorFactor.z << ", "
+            << staticMaterial.baseColorFactor.w << "), metallic="
+            << staticMaterial.metallicFactor
+            << ", roughness="
+            << staticMaterial.roughnessFactor
+            << ", normalScale="
+            << staticMaterial.normalScale
+            << ".\n";
+
+        const auto logMaterialTexture = [](
+            const char* label,
+            const std::optional<dx12::MaterialTextureSource>& texture)
+        {
+            if (!texture.has_value())
+            {
+                std::cout
+                    << "Static glTF material "
+                    << label
+                    << ": not specified; the future upload milestone will "
+                       "use the glTF default texture.\n";
+                return;
+            }
+
+            std::cout
+                << "Static glTF material "
+                << label
+                << ": texture index "
+                << texture->textureIndex
+                << ", image index "
+                << texture->imageIndex
+                << ", TEXCOORD_"
+                << texture->textureCoordinateSet;
+
+            if (!texture->embeddedImageBytes.empty())
+            {
+                std::cout
+                    << ", embedded "
+                    << texture->mimeType
+                    << ", "
+                    << texture->embeddedImageBytes.size()
+                    << " encoded bytes.\n";
+            }
+            else
+            {
+                std::cout
+                    << ", resolved image path "
+                    << texture->imagePath.string()
+                    << ".\n";
+            }
+        };
+
+        logMaterialTexture(
+            "Base Color",
+            staticMaterial.baseColorTexture
+        );
+        logMaterialTexture(
+            "Normal",
+            staticMaterial.normalTexture
+        );
+        logMaterialTexture(
+            "Metallic-Roughness",
+            staticMaterial.metallicRoughnessTexture
+        );
+        std::cout << std::flush;
+
+        const DirectX::XMFLOAT3 directionalLightDirection{
+            0.4F,
+            -1.0F,
+            0.3F
+        };
+        const DirectX::XMFLOAT3 directionalLightColor{
+            1.0F,
+            0.95F,
+            0.85F
+        };
+        constexpr float directionalLightIntensity = 2.5F;
+        constexpr float ambientIntensity = 0.03F;
+
+        std::cout
+            << "Forward PBR directional light: direction=(0.4, -1, 0.3), "
+               "color=(1, 0.95, 0.85), intensity="
+            << directionalLightIntensity
+            << ", ambient="
+            << ambientIntensity
+            << ".\n";
 
         // Static geometry is copied once from a CPU-visible upload resource
         // into a GPU-oriented default-heap resource. The upload resource must
@@ -777,11 +867,13 @@ int main()
         vertexUploadHeapProperties.CreationNodeMask = 1;
         vertexUploadHeapProperties.VisibleNodeMask = 1;
 
-        constexpr UINT vertexBufferSize =
-            static_cast<UINT>(sizeof(triangleVertices));
+        const UINT vertexBufferSize = static_cast<UINT>(
+            staticMesh.vertices.size() * sizeof(dx12::Vertex)
+        );
 
-        constexpr UINT indexBufferSize =
-            static_cast<UINT>(sizeof(triangleIndices));
+        const UINT indexBufferSize = static_cast<UINT>(
+            staticMesh.indices.size() * sizeof(std::uint32_t)
+        );
 
         D3D12_RESOURCE_DESC vertexBufferDescription{};
 
@@ -843,7 +935,7 @@ int main()
 
         dx12::ThrowIfFailed(
             triangleVertexBuffer->SetName(
-                L"Triangle Vertex Buffer"
+                L"Static glTF Mesh Vertex Buffer"
             ),
             "ID3D12Resource::SetName for triangle vertex buffer"
         );
@@ -865,7 +957,7 @@ int main()
 
         dx12::ThrowIfFailed(
             triangleVertexUploadBuffer->SetName(
-                L"Triangle Vertex Upload Buffer"
+                L"Static glTF Mesh Vertex Upload Buffer"
             ),
             "ID3D12Resource::SetName "
             "for triangle vertex upload buffer"
@@ -888,7 +980,7 @@ int main()
 
         dx12::ThrowIfFailed(
             triangleIndexBuffer->SetName(
-                L"Triangle Index Buffer"
+                L"Static glTF Mesh Index Buffer"
             ),
             "ID3D12Resource::SetName for triangle index buffer"
         );
@@ -910,165 +1002,206 @@ int main()
 
         dx12::ThrowIfFailed(
             triangleIndexUploadBuffer->SetName(
-                L"Triangle Index Upload Buffer"
+                L"Static glTF Mesh Index Upload Buffer"
             ),
             "ID3D12Resource::SetName "
             "for triangle index upload buffer"
         );
 
-        // This small procedural checkerboard keeps the first texture milestone
-        // focused on the DirectX 12 upload and binding path instead of adding
-        // an image-file decoder. Its bytes represent sRGB base-color values.
-        constexpr UINT baseColorTextureWidth = 4;
-        constexpr UINT baseColorTextureHeight = 4;
-        constexpr UINT baseColorTextureBytesPerPixel = 4;
-        constexpr UINT baseColorTextureSourceRowSize =
-            baseColorTextureWidth * baseColorTextureBytesPerPixel;
-
-        constexpr auto baseColorTexturePixels = []
+        const auto createSolidImage = [](
+            std::array<std::uint8_t, 4> rgba) -> dx12::DecodedImage
         {
-            std::array<std::uint8_t, 4 * 4 * 4> pixels{};
+            dx12::DecodedImage image;
+            image.width = 1;
+            image.height = 1;
+            image.rowStride = 4;
+            image.rgba8Pixels.assign(rgba.begin(), rgba.end());
+            return image;
+        };
 
-            for (std::size_t y = 0; y < 4; ++y)
+        const auto decodeOrDefault = [&createSolidImage](
+            const std::optional<dx12::MaterialTextureSource>& source,
+            std::array<std::uint8_t, 4> defaultRgba)
+        {
+            return source.has_value()
+                ? dx12::DecodeWicImage(*source)
+                : createSolidImage(defaultRgba);
+        };
+
+        constexpr std::size_t materialTextureCount = 3;
+        std::array<MaterialTextureUpload, materialTextureCount>
+            materialTextures{};
+
+        materialTextures[0].image = decodeOrDefault(
+            staticMaterial.baseColorTexture,
+            {255, 255, 255, 255}
+        );
+        materialTextures[0].srvFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        materialTextures[0].resourceName = L"glTF Base Color Texture";
+        materialTextures[0].uploadName = L"glTF Base Color Upload Buffer";
+
+        materialTextures[1].image = decodeOrDefault(
+            staticMaterial.normalTexture,
+            {128, 128, 255, 255}
+        );
+        materialTextures[1].srvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        materialTextures[1].resourceName = L"glTF Normal Texture";
+        materialTextures[1].uploadName = L"glTF Normal Upload Buffer";
+
+        materialTextures[2].image = decodeOrDefault(
+            staticMaterial.metallicRoughnessTexture,
+            {255, 255, 255, 255}
+        );
+        materialTextures[2].srvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        materialTextures[2].resourceName =
+            L"glTF Metallic-Roughness Texture";
+        materialTextures[2].uploadName =
+            L"glTF Metallic-Roughness Upload Buffer";
+
+        const auto releaseEncodedImage = [](
+            std::optional<dx12::MaterialTextureSource>& source)
+        {
+            if (source.has_value())
             {
-                for (std::size_t x = 0; x < 4; ++x)
-                {
-                    const bool useOrange = ((x + y) % 2) == 0;
-                    const std::size_t pixelOffset = (y * 4 + x) * 4;
+                std::vector<std::uint8_t>{}.swap(
+                    source->embeddedImageBytes
+                );
+            }
+        };
+        releaseEncodedImage(staticMaterial.baseColorTexture);
+        releaseEncodedImage(staticMaterial.normalTexture);
+        releaseEncodedImage(staticMaterial.metallicRoughnessTexture);
 
-                    pixels[pixelOffset + 0] =
-                        useOrange ? std::uint8_t{255} : std::uint8_t{20};
-                    pixels[pixelOffset + 1] =
-                        useOrange ? std::uint8_t{96} : std::uint8_t{190};
-                    pixels[pixelOffset + 2] =
-                        useOrange ? std::uint8_t{24} : std::uint8_t{255};
-                    pixels[pixelOffset + 3] = std::uint8_t{255};
-                }
+        for (MaterialTextureUpload& materialTexture : materialTextures)
+        {
+            const dx12::DecodedImage& image = materialTexture.image;
+            const UINT64 expectedRowSize =
+                static_cast<UINT64>(image.width) * 4U;
+            if (image.rowStride != expectedRowSize ||
+                image.rgba8Pixels.size() !=
+                    static_cast<std::size_t>(image.rowStride) * image.height)
+            {
+                throw std::runtime_error(
+                    "Decoded material image is not tightly packed RGBA8."
+                );
             }
 
-            return pixels;
-        }();
+            D3D12_RESOURCE_DESC textureDescription{};
+            textureDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            textureDescription.Alignment = 0;
+            textureDescription.Width = image.width;
+            textureDescription.Height = image.height;
+            textureDescription.DepthOrArraySize = 1;
+            textureDescription.MipLevels = 1;
+            textureDescription.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+            textureDescription.SampleDesc.Count = 1;
+            textureDescription.SampleDesc.Quality = 0;
+            textureDescription.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+            textureDescription.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-        D3D12_RESOURCE_DESC baseColorTextureDescription{};
-        baseColorTextureDescription.Dimension =
-            D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        baseColorTextureDescription.Alignment = 0;
-        baseColorTextureDescription.Width = baseColorTextureWidth;
-        baseColorTextureDescription.Height = baseColorTextureHeight;
-        baseColorTextureDescription.DepthOrArraySize = 1;
-        baseColorTextureDescription.MipLevels = 1;
-        baseColorTextureDescription.Format =
-            DXGI_FORMAT_R8G8B8A8_TYPELESS;
-        baseColorTextureDescription.SampleDesc.Count = 1;
-        baseColorTextureDescription.SampleDesc.Quality = 0;
-        baseColorTextureDescription.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        baseColorTextureDescription.Flags = D3D12_RESOURCE_FLAG_NONE;
+            dx12::ThrowIfFailed(
+                device->CreateCommittedResource(
+                    &vertexDefaultHeapProperties,
+                    D3D12_HEAP_FLAG_NONE,
+                    &textureDescription,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    nullptr,
+                    IID_PPV_ARGS(materialTexture.texture.GetAddressOf())
+                ),
+                "CreateCommittedResource for glTF material texture"
+            );
+            dx12::ThrowIfFailed(
+                materialTexture.texture->SetName(
+                    materialTexture.resourceName.c_str()
+                ),
+                "SetName for glTF material texture"
+            );
 
-        Microsoft::WRL::ComPtr<ID3D12Resource> baseColorTexture;
-        dx12::ThrowIfFailed(
-            device->CreateCommittedResource(
-                &vertexDefaultHeapProperties,
-                D3D12_HEAP_FLAG_NONE,
-                &baseColorTextureDescription,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-                nullptr,
-                IID_PPV_ARGS(baseColorTexture.GetAddressOf())
-            ),
-            "ID3D12Device::CreateCommittedResource for base-color texture"
-        );
+            device->GetCopyableFootprints(
+                &textureDescription,
+                0,
+                1,
+                0,
+                &materialTexture.footprint,
+                &materialTexture.rowCount,
+                &materialTexture.rowSize,
+                &materialTexture.uploadBufferSize
+            );
+            if (materialTexture.rowCount != image.height ||
+                materialTexture.rowSize != expectedRowSize)
+            {
+                throw std::runtime_error(
+                    "Unexpected copyable footprint for glTF material texture."
+                );
+            }
 
-        dx12::ThrowIfFailed(
-            baseColorTexture->SetName(L"Checkerboard Base Color Texture"),
-            "ID3D12Resource::SetName for base-color texture"
-        );
-
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT baseColorUploadFootprint{};
-        UINT baseColorUploadRowCount = 0;
-        UINT64 baseColorUploadRowSize = 0;
-        UINT64 baseColorUploadBufferSize = 0;
-
-        device->GetCopyableFootprints(
-            &baseColorTextureDescription,
-            0,
-            1,
-            0,
-            &baseColorUploadFootprint,
-            &baseColorUploadRowCount,
-            &baseColorUploadRowSize,
-            &baseColorUploadBufferSize
-        );
-
-        if (baseColorUploadRowCount != baseColorTextureHeight ||
-            baseColorUploadRowSize != baseColorTextureSourceRowSize)
-        {
-            throw std::runtime_error(
-                "Unexpected copyable footprint for the base-color texture."
+            D3D12_RESOURCE_DESC uploadDescription =
+                vertexBufferDescription;
+            uploadDescription.Width = materialTexture.uploadBufferSize;
+            dx12::ThrowIfFailed(
+                device->CreateCommittedResource(
+                    &vertexUploadHeapProperties,
+                    D3D12_HEAP_FLAG_NONE,
+                    &uploadDescription,
+                    D3D12_RESOURCE_STATE_GENERIC_READ,
+                    nullptr,
+                    IID_PPV_ARGS(materialTexture.uploadBuffer.GetAddressOf())
+                ),
+                "CreateCommittedResource for glTF material upload buffer"
+            );
+            dx12::ThrowIfFailed(
+                materialTexture.uploadBuffer->SetName(
+                    materialTexture.uploadName.c_str()
+                ),
+                "SetName for glTF material upload buffer"
             );
         }
 
-        D3D12_RESOURCE_DESC baseColorUploadBufferDescription =
-            vertexBufferDescription;
-        baseColorUploadBufferDescription.Width = baseColorUploadBufferSize;
-
-        Microsoft::WRL::ComPtr<ID3D12Resource> baseColorTextureUploadBuffer;
-        dx12::ThrowIfFailed(
-            device->CreateCommittedResource(
-                &vertexUploadHeapProperties,
-                D3D12_HEAP_FLAG_NONE,
-                &baseColorUploadBufferDescription,
-                D3D12_RESOURCE_STATE_GENERIC_READ,
-                nullptr,
-                IID_PPV_ARGS(baseColorTextureUploadBuffer.GetAddressOf())
-            ),
-            "ID3D12Device::CreateCommittedResource for texture upload buffer"
-        );
-
-        dx12::ThrowIfFailed(
-            baseColorTextureUploadBuffer->SetName(
-                L"Checkerboard Base Color Upload Buffer"
-            ),
-            "ID3D12Resource::SetName for texture upload buffer"
-        );
-
-        D3D12_DESCRIPTOR_HEAP_DESC baseColorSrvHeapDescription{};
-        baseColorSrvHeapDescription.Type =
+        D3D12_DESCRIPTOR_HEAP_DESC materialSrvHeapDescription{};
+        materialSrvHeapDescription.Type =
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        baseColorSrvHeapDescription.NumDescriptors = 1;
-        baseColorSrvHeapDescription.Flags =
+        materialSrvHeapDescription.NumDescriptors =
+            static_cast<UINT>(materialTextures.size());
+        materialSrvHeapDescription.Flags =
             D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        baseColorSrvHeapDescription.NodeMask = 0;
 
-        Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> baseColorSrvHeap;
+        Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> materialSrvHeap;
         dx12::ThrowIfFailed(
             device->CreateDescriptorHeap(
-                &baseColorSrvHeapDescription,
-                IID_PPV_ARGS(baseColorSrvHeap.GetAddressOf())
+                &materialSrvHeapDescription,
+                IID_PPV_ARGS(materialSrvHeap.GetAddressOf())
             ),
-            "ID3D12Device::CreateDescriptorHeap for base-color SRV"
+            "CreateDescriptorHeap for glTF material SRVs"
         );
-
         dx12::ThrowIfFailed(
-            baseColorSrvHeap->SetName(L"Base Color SRV Heap"),
-            "ID3D12DescriptorHeap::SetName for base-color SRV heap"
+            materialSrvHeap->SetName(L"glTF Material SRV Heap"),
+            "SetName for glTF material SRV heap"
         );
 
-        D3D12_SHADER_RESOURCE_VIEW_DESC baseColorSrvDescription{};
-        baseColorSrvDescription.Format =
-            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-        baseColorSrvDescription.ViewDimension =
-            D3D12_SRV_DIMENSION_TEXTURE2D;
-        baseColorSrvDescription.Shader4ComponentMapping =
-            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        baseColorSrvDescription.Texture2D.MostDetailedMip = 0;
-        baseColorSrvDescription.Texture2D.MipLevels = 1;
-        baseColorSrvDescription.Texture2D.PlaneSlice = 0;
-        baseColorSrvDescription.Texture2D.ResourceMinLODClamp = 0.0f;
-
-        device->CreateShaderResourceView(
-            baseColorTexture.Get(),
-            &baseColorSrvDescription,
-            baseColorSrvHeap->GetCPUDescriptorHandleForHeapStart()
-        );
+        const UINT materialSrvDescriptorSize =
+            device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV
+            );
+        D3D12_CPU_DESCRIPTOR_HANDLE materialSrvHandle =
+            materialSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        for (const MaterialTextureUpload& materialTexture : materialTextures)
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDescription{};
+            srvDescription.Format = materialTexture.srvFormat;
+            srvDescription.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvDescription.Shader4ComponentMapping =
+                D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDescription.Texture2D.MostDetailedMip = 0;
+            srvDescription.Texture2D.MipLevels = 1;
+            srvDescription.Texture2D.PlaneSlice = 0;
+            srvDescription.Texture2D.ResourceMinLODClamp = 0.0F;
+            device->CreateShaderResourceView(
+                materialTexture.texture.Get(),
+                &srvDescription,
+                materialSrvHandle
+            );
+            materialSrvHandle.ptr += materialSrvDescriptorSize;
+        }
 
         // Copy the CPU vertex array into the temporary upload resource. The
         // GPU copy into triangleVertexBuffer is recorded after the main
@@ -1098,7 +1231,7 @@ int main()
 
         std::memcpy(
             mappedVertexData,
-            triangleVertices.data(),
+            staticMesh.vertices.data(),
             vertexBufferSize
         );
 
@@ -1132,7 +1265,7 @@ int main()
 
         std::memcpy(
             mappedIndexData,
-            triangleIndices.data(),
+            staticMesh.indices.data(),
             indexBufferSize
         );
 
@@ -1146,68 +1279,64 @@ int main()
             &indexWrittenRange
         );
 
-        // Texture upload rows must use the device-provided RowPitch, which is
-        // aligned more strictly than the tightly packed 16-byte source rows.
-        void* mappedTextureData = nullptr;
-        dx12::ThrowIfFailed(
-            baseColorTextureUploadBuffer->Map(
-                0,
-                &noCpuReads,
-                &mappedTextureData
-            ),
-            "ID3D12Resource::Map for texture upload buffer"
-        );
-
-        if (mappedTextureData == nullptr)
+        // Each decoded image is tightly packed, while each D3D12 upload row
+        // uses the device-provided aligned RowPitch.
+        for (MaterialTextureUpload& materialTexture : materialTextures)
         {
-            throw std::runtime_error(
-                "Texture upload buffer mapping returned a null pointer."
+            void* mappedTextureData = nullptr;
+            dx12::ThrowIfFailed(
+                materialTexture.uploadBuffer->Map(
+                    0,
+                    &noCpuReads,
+                    &mappedTextureData
+                ),
+                "Map glTF material texture upload buffer"
             );
+            if (mappedTextureData == nullptr)
+            {
+                throw std::runtime_error(
+                    "Material texture upload mapping returned null."
+                );
+            }
+
+            auto* const destinationBytes =
+                static_cast<std::uint8_t*>(mappedTextureData) +
+                materialTexture.footprint.Offset;
+            const dx12::DecodedImage& image = materialTexture.image;
+            for (UINT row = 0; row < materialTexture.rowCount; ++row)
+            {
+                std::memcpy(
+                    destinationBytes +
+                        static_cast<std::size_t>(row) *
+                        materialTexture.footprint.Footprint.RowPitch,
+                    image.rgba8Pixels.data() +
+                        static_cast<std::size_t>(row) * image.rowStride,
+                    image.rowStride
+                );
+            }
+
+            const SIZE_T writtenEnd =
+                static_cast<SIZE_T>(materialTexture.footprint.Offset) +
+                static_cast<SIZE_T>(materialTexture.rowCount - 1U) *
+                    materialTexture.footprint.Footprint.RowPitch +
+                image.rowStride;
+            const D3D12_RANGE writtenTextureRange{
+                .Begin = static_cast<SIZE_T>(materialTexture.footprint.Offset),
+                .End = writtenEnd
+            };
+            materialTexture.uploadBuffer->Unmap(0, &writtenTextureRange);
+
+            std::cout
+                << "Decoded glTF material texture: "
+                << image.width
+                << " x "
+                << image.height
+                << ", RGBA8 source row "
+                << image.rowStride
+                << " bytes, D3D12 upload RowPitch "
+                << materialTexture.footprint.Footprint.RowPitch
+                << " bytes.\n";
         }
-
-        auto* const textureUploadBytes =
-            static_cast<std::uint8_t*>(mappedTextureData) +
-            baseColorUploadFootprint.Offset;
-
-        for (UINT row = 0; row < baseColorUploadRowCount; ++row)
-        {
-            std::memcpy(
-                textureUploadBytes +
-                    static_cast<std::size_t>(row) *
-                    baseColorUploadFootprint.Footprint.RowPitch,
-                baseColorTexturePixels.data() +
-                    static_cast<std::size_t>(row) *
-                    baseColorTextureSourceRowSize,
-                baseColorTextureSourceRowSize
-            );
-        }
-
-        const SIZE_T textureUploadWrittenEnd =
-            static_cast<SIZE_T>(baseColorUploadFootprint.Offset) +
-            static_cast<SIZE_T>(baseColorUploadRowCount - 1U) *
-            baseColorUploadFootprint.Footprint.RowPitch +
-            baseColorTextureSourceRowSize;
-
-        D3D12_RANGE textureUploadWrittenRange{
-            .Begin = static_cast<SIZE_T>(baseColorUploadFootprint.Offset),
-            .End = textureUploadWrittenEnd
-        };
-
-        baseColorTextureUploadBuffer->Unmap(
-            0,
-            &textureUploadWrittenRange
-        );
-
-        std::cout
-            << "Checkerboard texture resources created: "
-            << baseColorTextureWidth
-            << " x "
-            << baseColorTextureHeight
-            << ", source row "
-            << baseColorTextureSourceRowSize
-            << " bytes, upload row pitch "
-            << baseColorUploadFootprint.Footprint.RowPitch
-            << " bytes.\n";
         
             //explain buffer
         D3D12_VERTEX_BUFFER_VIEW
@@ -1220,7 +1349,7 @@ int main()
             vertexBufferSize;
 
         triangleVertexBufferView.StrideInBytes =
-            static_cast<UINT>(sizeof(Vertex));
+            static_cast<UINT>(sizeof(dx12::Vertex));
 
         D3D12_INDEX_BUFFER_VIEW triangleIndexBufferView{};
 
@@ -1231,18 +1360,18 @@ int main()
             indexBufferSize;
 
         triangleIndexBufferView.Format =
-            DXGI_FORMAT_R16_UINT;
+            DXGI_FORMAT_R32_UINT;
 
         std::cout
-            << "Triangle default and upload index buffers created: "
-            << triangleIndices.size()
+            << "Static glTF default and upload index buffers created: "
+            << staticMesh.indices.size()
             << " indices, "
             << indexBufferSize
             << " bytes; GPU upload pending.\n";
 
         std::cout
-            << "Triangle default and upload vertex buffers created: "
-            << triangleVertices.size()
+            << "Static glTF default and upload vertex buffers created: "
+            << staticMesh.vertices.size()
             << " vertices, "
             << vertexBufferSize
             << " bytes; GPU upload pending.\n";
@@ -1256,7 +1385,7 @@ int main()
                 0,
                 DXGI_FORMAT_R32G32B32_FLOAT,
                 0,
-                static_cast<UINT>(offsetof(Vertex, position)),
+                static_cast<UINT>(offsetof(dx12::Vertex, position)),
                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
                 0
             },
@@ -1265,7 +1394,7 @@ int main()
                 0,
                 DXGI_FORMAT_R32G32B32_FLOAT,
                 0,
-                static_cast<UINT>(offsetof(Vertex, normal)),
+                static_cast<UINT>(offsetof(dx12::Vertex, normal)),
                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
                 0
             },
@@ -1275,7 +1404,7 @@ int main()
                 DXGI_FORMAT_R32G32_FLOAT,
                 0,
                 static_cast<UINT>(
-                    offsetof(Vertex, textureCoordinates)
+                    offsetof(dx12::Vertex, textureCoordinates)
                 ),
                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
                 0
@@ -1285,7 +1414,7 @@ int main()
                 0,
                 DXGI_FORMAT_R32G32B32A32_FLOAT,
                 0,
-                static_cast<UINT>(offsetof(Vertex, tangent)),
+                static_cast<UINT>(offsetof(dx12::Vertex, tangent)),
                 D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
                 0
             }
@@ -1322,7 +1451,7 @@ int main()
             D3D12_FILL_MODE_SOLID;
 
         rasterizerDescription.CullMode =
-            D3D12_CULL_MODE_NONE;
+            D3D12_CULL_MODE_BACK;
 
         rasterizerDescription.FrontCounterClockwise =
             FALSE;
@@ -1981,47 +2110,41 @@ int main()
             &indexBufferReadyBarrier
         );
 
-        D3D12_TEXTURE_COPY_LOCATION baseColorCopyDestination{};
-        baseColorCopyDestination.pResource = baseColorTexture.Get();
-        baseColorCopyDestination.Type =
-            D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        baseColorCopyDestination.SubresourceIndex = 0;
+        for (MaterialTextureUpload& materialTexture : materialTextures)
+        {
+            D3D12_TEXTURE_COPY_LOCATION destination{};
+            destination.pResource = materialTexture.texture.Get();
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            destination.SubresourceIndex = 0;
 
-        D3D12_TEXTURE_COPY_LOCATION baseColorCopySource{};
-        baseColorCopySource.pResource =
-            baseColorTextureUploadBuffer.Get();
-        baseColorCopySource.Type =
-            D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        baseColorCopySource.PlacedFootprint =
-            baseColorUploadFootprint;
+            D3D12_TEXTURE_COPY_LOCATION source{};
+            source.pResource = materialTexture.uploadBuffer.Get();
+            source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            source.PlacedFootprint = materialTexture.footprint;
 
-        CommandList->CopyTextureRegion(
-            &baseColorCopyDestination,
-            0,
-            0,
-            0,
-            &baseColorCopySource,
-            nullptr
-        );
+            CommandList->CopyTextureRegion(
+                &destination,
+                0,
+                0,
+                0,
+                &source,
+                nullptr
+            );
 
-        D3D12_RESOURCE_BARRIER baseColorTextureReadyBarrier{};
-        baseColorTextureReadyBarrier.Type =
-            D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        baseColorTextureReadyBarrier.Flags =
-            D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        baseColorTextureReadyBarrier.Transition.pResource =
-            baseColorTexture.Get();
-        baseColorTextureReadyBarrier.Transition.Subresource =
-            D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        baseColorTextureReadyBarrier.Transition.StateBefore =
-            D3D12_RESOURCE_STATE_COPY_DEST;
-        baseColorTextureReadyBarrier.Transition.StateAfter =
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
-        CommandList->ResourceBarrier(
-            1,
-            &baseColorTextureReadyBarrier
-        );
+            D3D12_RESOURCE_BARRIER textureReadyBarrier{};
+            textureReadyBarrier.Type =
+                D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            textureReadyBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            textureReadyBarrier.Transition.pResource =
+                materialTexture.texture.Get();
+            textureReadyBarrier.Transition.Subresource =
+                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            textureReadyBarrier.Transition.StateBefore =
+                D3D12_RESOURCE_STATE_COPY_DEST;
+            textureReadyBarrier.Transition.StateAfter =
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            CommandList->ResourceBarrier(1, &textureReadyBarrier);
+        }
 
         dx12::ThrowIfFailed(
             CommandList->Close(),
@@ -2156,12 +2279,19 @@ int main()
         // list, so all temporary upload resources are now safe to release.
         triangleVertexUploadBuffer.Reset();
         triangleIndexUploadBuffer.Reset();
-        baseColorTextureUploadBuffer.Reset();
+        for (MaterialTextureUpload& materialTexture : materialTextures)
+        {
+            materialTexture.uploadBuffer.Reset();
+            std::vector<std::uint8_t>{}.swap(
+                materialTexture.image.rgba8Pixels
+            );
+        }
 
         std::cout
             << "Static geometry and texture uploads completed at Fence value "
             << vertexUploadFenceValue
             << "; temporary upload buffers were released.\n";
+        std::cout << std::flush;
 
         //window
         //ShowWindow             
@@ -2689,10 +2819,38 @@ int main()
                     frameDeltaSeconds
                 );
 
+            // The glTF node transform is already converted from glTF's
+            // right-handed convention to this renderer's left-handed,
+            // row-vector matrix convention. Apply the existing visible
+            // rotation after the imported node transform.
             const DirectX::XMMATRIX modelMatrix =
+                DirectX::XMLoadFloat4x4(
+                    &staticMesh.nodeTransform
+                ) *
                 DirectX::XMMatrixRotationZ(
                     triangleRotationRadians
                 );
+
+            DirectX::XMVECTOR modelDeterminant{};
+            const DirectX::XMMATRIX inverseModelMatrix =
+                DirectX::XMMatrixInverse(
+                    &modelDeterminant,
+                    modelMatrix
+                );
+            const float modelDeterminantValue =
+                DirectX::XMVectorGetX(modelDeterminant);
+            if (!std::isfinite(modelDeterminantValue) ||
+                std::abs(modelDeterminantValue) < 1.0e-8F)
+            {
+                throw std::runtime_error(
+                    "The Model Matrix is singular; a Normal Matrix cannot "
+                    "be computed."
+                );
+            }
+            const float modelHandedness =
+                modelDeterminantValue < 0.0F ? -1.0F : 1.0F;
+            const DirectX::XMMATRIX normalMatrix =
+                DirectX::XMMatrixTranspose(inverseModelMatrix);
 
             const DirectX::XMVECTOR cameraPosition =
                 DirectX::XMLoadFloat3(
@@ -2734,6 +2892,25 @@ int main()
                 &transformConstants.projection,
                 projectionMatrix
             );
+
+            DirectX::XMStoreFloat4x4(
+                &transformConstants.normalMatrix,
+                normalMatrix
+            );
+
+            const PbrConstants pbrConstants{
+                .baseColorFactor = staticMaterial.baseColorFactor,
+                .cameraWorldPosition = cameraState.position,
+                .metallicFactor = staticMaterial.metallicFactor,
+                .directionalLightDirection = directionalLightDirection,
+                .roughnessFactor = staticMaterial.roughnessFactor,
+                .directionalLightColor = directionalLightColor,
+                .normalScale = staticMaterial.normalScale,
+                .directionalLightIntensity = directionalLightIntensity,
+                .ambientIntensity = ambientIntensity,
+                .modelHandedness = modelHandedness,
+                .padding = 0.0F
+            };
 
             std::memcpy(
                 mappedTransformConstantData[
@@ -2854,7 +3031,7 @@ int main()
             // Descriptor tables contain GPU descriptor handles, so their heap
             // must be shader-visible and bound before setting root parameter 1.
             ID3D12DescriptorHeap* const shaderVisibleDescriptorHeaps[] = {
-                baseColorSrvHeap.Get()
+                materialSrvHeap.Get()
             };
 
             CommandList->SetDescriptorHeaps(
@@ -2879,10 +3056,18 @@ int main()
                 ]->GetGPUVirtualAddress()
             );
 
-            // Root parameter 1 is the one-SRV table mapped to pixel-shader t0.
+            // Root parameter 1 is the three-SRV table mapped to t0-t2.
             CommandList->SetGraphicsRootDescriptorTable(
                 1,
-                baseColorSrvHeap->GetGPUDescriptorHandleForHeapStart()
+                materialSrvHeap->GetGPUDescriptorHandleForHeapStart()
+            );
+
+            // Root parameter 2 copies twenty 32-bit PBR values into b1.
+            CommandList->SetGraphicsRoot32BitConstants(
+                2,
+                20,
+                &pbrConstants,
+                0
             );
 
             CommandList->IASetPrimitiveTopology(
@@ -2902,7 +3087,7 @@ int main()
             );
 
             CommandList->DrawIndexedInstanced(
-                static_cast<UINT>(triangleIndices.size()),
+                static_cast<UINT>(staticMesh.indices.size()),
                 1,
                 0,
                 0,

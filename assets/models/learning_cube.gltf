@@ -1,0 +1,150 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "Dx12Renderer static glTF learning milestone"
+  },
+  "scene": 0,
+  "scenes": [
+    {
+      "name": "Learning Cube Scene",
+      "nodes": [0]
+    }
+  ],
+  "nodes": [
+    {
+      "name": "Learning Cube Node",
+      "mesh": 0,
+      "rotation": [0.0, 0.2164396, 0.0, 0.9762960],
+      "scale": [0.9, 0.9, 0.9]
+    }
+  ],
+  "meshes": [
+    {
+      "name": "Learning Cube Mesh",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "NORMAL": 1,
+            "TEXCOORD_0": 2,
+            "TANGENT": 3
+          },
+          "indices": 4,
+          "material": 0,
+          "mode": 4
+        }
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "Learning Cube Material",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [0.8, 0.65, 0.5, 1.0],
+        "baseColorTexture": {
+          "index": 0,
+          "texCoord": 0
+        },
+        "metallicFactor": 0.7,
+        "roughnessFactor": 0.35,
+        "metallicRoughnessTexture": {
+          "index": 2,
+          "texCoord": 0
+        }
+      },
+      "normalTexture": {
+        "index": 1,
+        "texCoord": 0,
+        "scale": 0.8
+      }
+    }
+  ],
+  "textures": [
+    {
+      "name": "Learning Cube Base Color Texture",
+      "source": 0
+    },
+    {
+      "name": "Learning Cube Normal Texture",
+      "source": 1
+    },
+    {
+      "name": "Learning Cube Metallic-Roughness Texture",
+      "source": 2
+    }
+  ],
+  "images": [
+    {
+      "name": "Learning Cube Base Color Image",
+      "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAmSURBVChTY3hmI/cfhCWbPoAxOp+wAlwSMD5hBbgkYHyau0HuPwDFSpkhzsAAYwAAAABJRU5ErkJggg=="
+    },
+    {
+      "name": "Learning Cube Normal Image",
+      "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAgSURBVChTYzib9uw/MjZGw3RRMAsogYSN0TDNFTz7DwA8KrlB8PwZpAAAAABJRU5ErkJggg=="
+    },
+    {
+      "name": "Learning Cube Metallic-Roughness Image",
+      "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABJSURBVChTVckxFYAwAAPRSKkPhOCjPvCBkPpgq430Jl4y/OVOHsNtF/kiFkaQb2JhBHkSCyPID7EwgvwSCyPIi1gYQf6IhfHbPrK7wCEGtcbbAAAAAElFTkSuQmCC"
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 1224,
+      "uri": "data:application/octet-stream;base64,AABAvwAAQL8AAEA/AAAAAAAAAAAAAIA/AAAAAAAAgD8AAIA/AAAAAAAAAAAAAIA/AABAPwAAQL8AAEA/AAAAAAAAAAAAAIA/AACAPwAAgD8AAIA/AAAAAAAAAAAAAIA/AABAPwAAQD8AAEA/AAAAAAAAAAAAAIA/AACAPwAAAAAAAIA/AAAAAAAAAAAAAIA/AABAvwAAQD8AAEA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AABAPwAAQL8AAEC/AAAAAAAAAAAAAIC/AAAAAAAAgD8AAIC/AAAAAAAAAAAAAIA/AABAvwAAQL8AAEC/AAAAAAAAAAAAAIC/AACAPwAAgD8AAIC/AAAAAAAAAAAAAIA/AABAvwAAQD8AAEC/AAAAAAAAAAAAAIC/AACAPwAAAAAAAIC/AAAAAAAAAAAAAIA/AABAPwAAQD8AAEC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIA/AABAPwAAQL8AAEA/AACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAgL8AAIA/AABAPwAAQL8AAEC/AACAPwAAAAAAAAAAAACAPwAAgD8AAAAAAAAAAAAAgL8AAIA/AABAPwAAQD8AAEC/AACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgL8AAIA/AABAPwAAQD8AAEA/AACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgL8AAIA/AABAvwAAQL8AAEC/AACAvwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAIA/AABAvwAAQL8AAEA/AACAvwAAAAAAAAAAAACAPwAAgD8AAAAAAAAAAAAAgD8AAIA/AABAvwAAQD8AAEA/AACAvwAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAIA/AABAvwAAQD8AAEC/AACAvwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgD8AAIA/AABAvwAAQD8AAEA/AAAAAAAAgD8AAAAAAAAAAAAAgD8AAIA/AAAAAAAAAAAAAIA/AABAPwAAQD8AAEA/AAAAAAAAgD8AAAAAAACAPwAAgD8AAIA/AAAAAAAAAAAAAIA/AABAPwAAQD8AAEC/AAAAAAAAgD8AAAAAAACAPwAAAAAAAIA/AAAAAAAAAAAAAIA/AABAvwAAQD8AAEC/AAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AABAvwAAQL8AAEC/AAAAAAAAgL8AAAAAAAAAAAAAgD8AAIA/AAAAAAAAAAAAAIA/AABAPwAAQL8AAEC/AAAAAAAAgL8AAAAAAACAPwAAgD8AAIA/AAAAAAAAAAAAAIA/AABAPwAAQL8AAEA/AAAAAAAAgL8AAAAAAACAPwAAAAAAAIA/AAAAAAAAAAAAAIA/AABAvwAAQL8AAEA/AAAAAAAAgL8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAABAAIAAAACAAMABAAFAAYABAAGAAcACAAJAAoACAAKAAsADAANAA4ADAAOAA8AEAARABIAEAASABMAFAAVABYAFAAWABcA"
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 1152,
+      "byteStride": 48,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 1152,
+      "byteLength": 72,
+      "target": 34963
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "byteOffset": 0,
+      "componentType": 5126,
+      "count": 24,
+      "type": "VEC3",
+      "min": [-0.75, -0.75, -0.75],
+      "max": [0.75, 0.75, 0.75]
+    },
+    {
+      "bufferView": 0,
+      "byteOffset": 12,
+      "componentType": 5126,
+      "count": 24,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 0,
+      "byteOffset": 24,
+      "componentType": 5126,
+      "count": 24,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 0,
+      "byteOffset": 32,
+      "componentType": 5126,
+      "count": 24,
+      "type": "VEC4"
+    },
+    {
+      "bufferView": 1,
+      "byteOffset": 0,
+      "componentType": 5123,
+      "count": 36,
+      "type": "SCALAR"
+    }
+  ]
+}

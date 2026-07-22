@@ -6,7 +6,12 @@ project(Dx12Renderer
 )
 
 add_executable(DX12EnvironmentCheck
+    src/GltfLoader.cpp
+    src/GltfLoader.h
     src/HResult.h
+    src/MeshData.h
+    src/WicImageLoader.cpp
+    src/WicImageLoader.h
     src/main.cpp
 )
 
@@ -28,6 +33,8 @@ target_link_libraries(DX12EnvironmentCheck
         d3d12
         dxgi
         dxguid
+        ole32
+        windowscodecs
 )
 
 if(NOT CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
@@ -144,6 +151,28 @@ add_custom_target(DX12Shaders
 )
 
 add_dependencies(DX12EnvironmentCheck DX12Shaders)
+
+set(LEARNING_GLTF_ASSET
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/models/learning_cube.gltf"
+)
+
+if(NOT EXISTS "${LEARNING_GLTF_ASSET}")
+    message(FATAL_ERROR
+        "Static glTF learning asset was not found: ${LEARNING_GLTF_ASSET}"
+    )
+endif()
+
+add_custom_command(
+    TARGET DX12EnvironmentCheck
+    POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "$<TARGET_FILE_DIR:DX12EnvironmentCheck>/assets/models"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${LEARNING_GLTF_ASSET}"
+        "$<TARGET_FILE_DIR:DX12EnvironmentCheck>/assets/models/learning_cube.gltf"
+    COMMENT "Copying the static glTF learning asset"
+    VERBATIM
+)
 
 if(MSVC)
     target_compile_options(DX12EnvironmentCheck

@@ -3,10 +3,30 @@ cbuffer TransformConstants : register(b0)
     row_major float4x4 model;
     row_major float4x4 view;
     row_major float4x4 projection;
+    row_major float4x4 normalMatrix;
 };
 
 Texture2D<float4> baseColorTexture : register(t0);
-SamplerState baseColorSampler : register(s0);
+Texture2D<float4> normalTexture : register(t1);
+Texture2D<float4> metallicRoughnessTexture : register(t2);
+SamplerState materialSampler : register(s0);
+
+cbuffer PbrConstants : register(b1)
+{
+    float4 baseColorFactor;
+    float3 cameraWorldPosition;
+    float metallicFactor;
+    float3 directionalLightDirection;
+    float roughnessFactor;
+    float3 directionalLightColor;
+    float normalScale;
+    float directionalLightIntensity;
+    float ambientIntensity;
+    float modelHandedness;
+    float pbrPadding;
+};
+
+static const float Pi = 3.14159265358979323846f;
 
 struct VertexShaderInput
 {
@@ -19,60 +39,199 @@ struct VertexShaderInput
 struct VertexShaderOutput
 {
     float4 position : SV_Position;
-    float3 normal : NORMAL;
+    float3 worldPosition : POSITION;
+    float3 worldNormal : NORMAL;
     float2 textureCoordinates : TEXCOORD;
-    float4 tangent : TANGENT;
+    float4 worldTangent : TANGENT;
 };
 
 VertexShaderOutput VSMain(VertexShaderInput input)
 {
     VertexShaderOutput output;
 
-    const float4 localPosition =
-        float4(input.position, 1.0f);
-
-    const float4 worldPosition =
-        mul(localPosition, model);
-
-    const float4 viewPosition =
-        mul(worldPosition, view);
-
-    output.position =
-        mul(viewPosition, projection);
-
-    output.normal = input.normal;
+    const float4 worldPosition = mul(
+        float4(input.position, 1.0f),
+        model
+    );
+    const float4 viewPosition = mul(worldPosition, view);
+    output.position = mul(viewPosition, projection);
+    output.worldPosition = worldPosition.xyz;
+    output.worldNormal = normalize(
+        mul(float4(input.normal, 0.0f), normalMatrix).xyz
+    );
+    output.worldTangent = float4(
+        normalize(mul(float4(input.tangent.xyz, 0.0f), model).xyz),
+        input.tangent.w * modelHandedness
+    );
     output.textureCoordinates = input.textureCoordinates;
-    output.tangent = input.tangent;
 
     return output;
+}
+
+float DistributionGgx(float3 normal, float3 halfVector, float roughness)
+{
+    const float alpha = roughness * roughness;
+    const float alphaSquared = alpha * alpha;
+    const float normalDotHalf = saturate(dot(normal, halfVector));
+    const float normalDotHalfSquared = normalDotHalf * normalDotHalf;
+    const float denominatorTerm =
+        normalDotHalfSquared * (alphaSquared - 1.0f) + 1.0f;
+
+    return alphaSquared /
+        max(Pi * denominatorTerm * denominatorTerm, 1.0e-7f);
+}
+
+float GeometrySchlickGgx(float normalDotDirection, float roughness)
+{
+    const float directLightingRoughness = roughness + 1.0f;
+    const float k =
+        directLightingRoughness * directLightingRoughness / 8.0f;
+
+    return normalDotDirection /
+        max(normalDotDirection * (1.0f - k) + k, 1.0e-7f);
+}
+
+float GeometrySmith(
+    float3 normal,
+    float3 viewDirection,
+    float3 lightDirection,
+    float roughness)
+{
+    const float normalDotView = saturate(dot(normal, viewDirection));
+    const float normalDotLight = saturate(dot(normal, lightDirection));
+
+    return
+        GeometrySchlickGgx(normalDotView, roughness) *
+        GeometrySchlickGgx(normalDotLight, roughness);
+}
+
+float3 FresnelSchlick(float cosineTheta, float3 reflectanceAtNormalIncidence)
+{
+    return reflectanceAtNormalIncidence +
+        (1.0f - reflectanceAtNormalIncidence) *
+        pow(1.0f - saturate(cosineTheta), 5.0f);
+}
+
+float3 LinearToSrgb(float3 linearColor)
+{
+    const float3 nonNegativeColor = max(linearColor, 0.0f);
+    const float3 lowSegment = 12.92f * nonNegativeColor;
+    const float3 highSegment =
+        1.055f * pow(nonNegativeColor, 1.0f / 2.4f) - 0.055f;
+    const float3 useHighSegment = step(
+        float3(0.0031308f, 0.0031308f, 0.0031308f),
+        nonNegativeColor
+    );
+
+    return lerp(lowSegment, highSegment, useHighSegment);
+}
+
+float3 NormalizeOrFallback(float3 value, float3 fallback)
+{
+    const float lengthSquared = dot(value, value);
+    return lengthSquared > 1.0e-8f
+        ? value * rsqrt(lengthSquared)
+        : fallback;
 }
 
 float4 PSMain(VertexShaderOutput input) : SV_Target0
 {
     const float4 sampledBaseColor = baseColorTexture.Sample(
-        baseColorSampler,
+        materialSampler,
         input.textureCoordinates
     );
+    const float3 baseColor =
+        sampledBaseColor.rgb * baseColorFactor.rgb;
 
-    // Normal and tangent lighting comes later. For now, preserve consumption
-    // of every expanded vertex attribute in the render-target alpha channel;
-    // blending is disabled, so this does not alter the visible texture color.
-    const float3 encodedNormal = input.normal * 0.5f + 0.5f;
-    const float3 encodedTangent = input.tangent.xyz * 0.5f + 0.5f;
-
-    const float normalCheck = dot(
-        encodedNormal,
-        float3(0.2f, 0.3f, 0.5f)
+    const float4 sampledMetallicRoughness =
+        metallicRoughnessTexture.Sample(
+            materialSampler,
+            input.textureCoordinates
+        );
+    const float metallic = saturate(
+        sampledMetallicRoughness.b * metallicFactor
+    );
+    const float roughness = clamp(
+        sampledMetallicRoughness.g * roughnessFactor,
+        0.045f,
+        1.0f
     );
 
-    const float tangentCheck = 0.5f * dot(
-        encodedTangent,
-        float3(0.4f, 0.35f, 0.25f)
-    ) + 0.5f * (input.tangent.w * 0.5f + 0.5f);
+    float3 tangentNormal = normalTexture.Sample(
+        materialSampler,
+        input.textureCoordinates
+    ).xyz * 2.0f - 1.0f;
+    tangentNormal.xy *= normalScale;
+    tangentNormal = normalize(tangentNormal);
 
-    const float attributeCheck = saturate(
-        0.5f * normalCheck + 0.5f * tangentCheck
+    const float3 geometricNormal = normalize(input.worldNormal);
+    float3 tangent = input.worldTangent.xyz -
+        geometricNormal * dot(geometricNormal, input.worldTangent.xyz);
+    tangent *= rsqrt(max(dot(tangent, tangent), 1.0e-8f));
+    const float3 bitangent =
+        normalize(cross(geometricNormal, tangent)) *
+        input.worldTangent.w;
+    const float3 normal = normalize(
+        tangent * tangentNormal.x +
+        bitangent * tangentNormal.y +
+        geometricNormal * tangentNormal.z
     );
 
-    return float4(sampledBaseColor.rgb, attributeCheck);
+    const float3 viewDirection = NormalizeOrFallback(
+        cameraWorldPosition - input.worldPosition,
+        geometricNormal
+    );
+    // The stored Directional Light vector is the direction in which light
+    // rays travel, so the surface-to-light vector uses its negation.
+    const float3 lightDirection = NormalizeOrFallback(
+        -directionalLightDirection,
+        geometricNormal
+    );
+    const float3 halfVector = NormalizeOrFallback(
+        viewDirection + lightDirection,
+        geometricNormal
+    );
+
+    const float normalDotLight = saturate(dot(normal, lightDirection));
+    const float normalDotView = saturate(dot(normal, viewDirection));
+    const float halfDotView = saturate(dot(halfVector, viewDirection));
+
+    const float3 dielectricF0 = float3(0.04f, 0.04f, 0.04f);
+    const float3 f0 = lerp(dielectricF0, baseColor, metallic);
+    const float3 fresnel = FresnelSchlick(halfDotView, f0);
+    const float distribution = DistributionGgx(
+        normal,
+        halfVector,
+        roughness
+    );
+    const float geometry = GeometrySmith(
+        normal,
+        viewDirection,
+        lightDirection,
+        roughness
+    );
+
+    const float3 specular =
+        distribution * geometry * fresnel /
+        max(4.0f * normalDotView * normalDotLight, 1.0e-5f);
+    const float3 diffuseWeight = (1.0f - fresnel) * (1.0f - metallic);
+    const float3 diffuse = diffuseWeight * baseColor / Pi;
+    const float3 radiance =
+        directionalLightColor * directionalLightIntensity;
+    const float3 directLighting =
+        (diffuse + specular) * radiance * normalDotLight;
+
+    // This is a small non-IBL fill term used only until the later IBL/HDR
+    // milestones. It prevents unlit dielectric faces from becoming pure black.
+    const float3 ambient =
+        ambientIntensity * baseColor * (1.0f - metallic);
+    const float3 linearColor = ambient + directLighting;
+
+    // The current swap chain is UNORM rather than sRGB. Clamp to SDR and
+    // explicitly encode linear lighting to sRGB; HDR tone mapping comes later.
+    const float3 outputColor = LinearToSrgb(saturate(linearColor));
+    return float4(
+        outputColor,
+        sampledBaseColor.a * baseColorFactor.a
+    );
 }
