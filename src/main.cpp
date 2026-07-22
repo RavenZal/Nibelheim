@@ -67,6 +67,19 @@ static_assert(
     "PBR root constants must contain exactly twenty 32-bit values."
 );
 
+struct ShadowConstants final
+{
+    DirectX::XMFLOAT4X4 lightViewProjection;
+    DirectX::XMFLOAT2 shadowTexelSize;
+    float receiverBias = 0.0015F;
+    float padding = 0.0F;
+};
+
+static_assert(
+    sizeof(ShadowConstants) == sizeof(float) * 20,
+    "Shadow root constants must contain exactly twenty 32-bit values."
+);
+
 struct MaterialTextureUpload final
 {
     dx12::DecodedImage image;
@@ -213,6 +226,10 @@ static_assert(
     transformConstantBufferSize == 256,
     "The transform constant-buffer allocation must be 256 bytes."
 );
+
+constexpr UINT drawObjectCount = 2;
+constexpr UINT transformFrameBufferSize =
+    transformConstantBufferSize * drawObjectCount;
 
 class ScopedEventHandle final
 {
@@ -540,12 +557,20 @@ int main()
         executableDirectory /
         L"shaders" /
         L"TrianglesPS.cso";
+
+        const std::filesystem::path shadowVertexShaderPath =
+        executableDirectory /
+        L"shaders" /
+        L"ShadowVS.cso";
         
         const std::vector<char> vertexShaderBytes =
             ReadBinaryFile(vertexShaderPath);
 
         const std::vector<char> pixelShaderBytes =
             ReadBinaryFile(pixelShaderPath);
+
+        const std::vector<char> shadowVertexShaderBytes =
+            ReadBinaryFile(shadowVertexShaderPath);
 
         std::cout
             << "Vertex shader loaded: "
@@ -555,6 +580,11 @@ int main()
         std::cout
             << "Pixel shader loaded: "
             << pixelShaderBytes.size()
+            << " bytes.\n";
+
+        std::cout
+            << "Shadow vertex shader loaded: "
+            << shadowVertexShaderBytes.size()
             << " bytes.\n";
 
         const D3D12_SHADER_BYTECODE vertexShaderBytecode{
@@ -567,20 +597,26 @@ int main()
             .BytecodeLength = pixelShaderBytes.size()
         };
 
+        const D3D12_SHADER_BYTECODE shadowVertexShaderBytecode{
+            .pShaderBytecode = shadowVertexShaderBytes.data(),
+            .BytecodeLength = shadowVertexShaderBytes.size()
+        };
+
         // Root parameter 0 keeps the per-frame transform CBV at b0. Root
-        // parameter 1 exposes one contiguous three-SRV table at t0-t2. Root
+        // parameter 1 exposes one contiguous four-SRV table at t0-t3. Root
         // parameter 2 supplies twenty 32-bit PBR values at b1 without a
-        // separate constant-buffer allocation.
+        // separate constant-buffer allocation. Root parameter 3 supplies the
+        // light matrix and Shadow Map sampling values at b2.
         D3D12_DESCRIPTOR_RANGE materialTextureRange{};
         materialTextureRange.RangeType =
             D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        materialTextureRange.NumDescriptors = 3;
+        materialTextureRange.NumDescriptors = 4;
         materialTextureRange.BaseShaderRegister = 0;
         materialTextureRange.RegisterSpace = 0;
         materialTextureRange.OffsetInDescriptorsFromTableStart =
             D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-        std::array<D3D12_ROOT_PARAMETER, 3> rootParameters{};
+        std::array<D3D12_ROOT_PARAMETER, 4> rootParameters{};
 
         D3D12_ROOT_PARAMETER& transformRootParameter =
             rootParameters[0];
@@ -618,6 +654,16 @@ int main()
         materialConstantsRootParameter.ShaderVisibility =
             D3D12_SHADER_VISIBILITY_ALL;
 
+        D3D12_ROOT_PARAMETER& shadowConstantsRootParameter =
+            rootParameters[3];
+        shadowConstantsRootParameter.ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        shadowConstantsRootParameter.Constants.ShaderRegister = 2;
+        shadowConstantsRootParameter.Constants.RegisterSpace = 0;
+        shadowConstantsRootParameter.Constants.Num32BitValues = 20;
+        shadowConstantsRootParameter.ShaderVisibility =
+            D3D12_SHADER_VISIBILITY_ALL;
+
         // A static sampler is embedded in the root signature because the
         // current three-texture Material table uses one fixed sampling policy.
         // No separate sampler descriptor heap is required for it.
@@ -638,6 +684,27 @@ int main()
         materialSampler.ShaderVisibility =
             D3D12_SHADER_VISIBILITY_PIXEL;
 
+        D3D12_STATIC_SAMPLER_DESC shadowSampler{};
+        shadowSampler.Filter =
+            D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
+        shadowSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        shadowSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        shadowSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        shadowSampler.MipLODBias = 0.0F;
+        shadowSampler.MaxAnisotropy = 1;
+        shadowSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        shadowSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+        shadowSampler.MinLOD = 0.0F;
+        shadowSampler.MaxLOD = D3D12_FLOAT32_MAX;
+        shadowSampler.ShaderRegister = 1;
+        shadowSampler.RegisterSpace = 0;
+        shadowSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        const std::array<D3D12_STATIC_SAMPLER_DESC, 2> staticSamplers{
+            materialSampler,
+            shadowSampler
+        };
+
         D3D12_ROOT_SIGNATURE_DESC rootSignatureDescription{};
 
         rootSignatureDescription.NumParameters =
@@ -645,8 +712,9 @@ int main()
         rootSignatureDescription.pParameters =
             rootParameters.data();
 
-        rootSignatureDescription.NumStaticSamplers = 1;
-        rootSignatureDescription.pStaticSamplers = &materialSampler;
+        rootSignatureDescription.NumStaticSamplers =
+            static_cast<UINT>(staticSamplers.size());
+        rootSignatureDescription.pStaticSamplers = staticSamplers.data();
 
         rootSignatureDescription.Flags =
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -722,7 +790,63 @@ int main()
 
         dx12::StaticModelData staticModel =
             dx12::LoadStaticGltfModel(staticMeshPath);
-        const dx12::MeshData& staticMesh = staticModel.mesh;
+        dx12::MeshData& staticMesh = staticModel.mesh;
+
+        if (staticMesh.vertices.size() >
+            std::numeric_limits<std::uint32_t>::max())
+        {
+            throw std::runtime_error(
+                "The loaded static glTF mesh has too many vertices for the "
+                "controlled Ground Plane index append."
+            );
+        }
+        const std::size_t cubeVertexCountValue = staticMesh.vertices.size();
+        const std::size_t cubeIndexCountValue = staticMesh.indices.size();
+        const std::uint32_t groundPlaneVertexStart =
+            static_cast<std::uint32_t>(staticMesh.vertices.size());
+        const std::size_t groundPlaneStartIndexValue =
+            staticMesh.indices.size();
+        constexpr std::array<dx12::Vertex, 4> groundPlaneVertices{{
+            {
+                {-4.0F, -1.2F, -4.0F},
+                {0.0F, 1.0F, 0.0F},
+                {0.0F, 4.0F},
+                {1.0F, 0.0F, 0.0F, 1.0F}
+            },
+            {
+                {-4.0F, -1.2F, 4.0F},
+                {0.0F, 1.0F, 0.0F},
+                {0.0F, 0.0F},
+                {1.0F, 0.0F, 0.0F, 1.0F}
+            },
+            {
+                {4.0F, -1.2F, 4.0F},
+                {0.0F, 1.0F, 0.0F},
+                {4.0F, 0.0F},
+                {1.0F, 0.0F, 0.0F, 1.0F}
+            },
+            {
+                {4.0F, -1.2F, -4.0F},
+                {0.0F, 1.0F, 0.0F},
+                {4.0F, 4.0F},
+                {1.0F, 0.0F, 0.0F, 1.0F}
+            }
+        }};
+        constexpr std::array<std::uint32_t, 6> groundPlaneLocalIndices{
+            0, 1, 2,
+            0, 2, 3
+        };
+        staticMesh.vertices.insert(
+            staticMesh.vertices.end(),
+            groundPlaneVertices.begin(),
+            groundPlaneVertices.end()
+        );
+        for (const std::uint32_t localIndex : groundPlaneLocalIndices)
+        {
+            staticMesh.indices.push_back(
+                groundPlaneVertexStart + localIndex
+            );
+        }
 
         if (staticMesh.vertices.size() >
                 std::numeric_limits<UINT>::max() / sizeof(dx12::Vertex) ||
@@ -735,14 +859,29 @@ int main()
             );
         }
 
+        const UINT cubeIndexCount =
+            static_cast<UINT>(cubeIndexCountValue);
+        const UINT groundPlaneStartIndex =
+            static_cast<UINT>(groundPlaneStartIndexValue);
+        constexpr UINT groundPlaneIndexCount =
+            static_cast<UINT>(groundPlaneLocalIndices.size());
+
         std::cout
             << "Static glTF mesh loaded: "
             << staticMeshPath.string()
             << ", "
-            << staticMesh.vertices.size()
+            << cubeVertexCountValue
             << " vertices, "
-            << staticMesh.indices.size()
+            << cubeIndexCountValue
             << " indices.\n";
+
+        std::cout
+            << "Shadow receiver ground plane appended: 4 vertices, 6 "
+               "indices; combined upload contains "
+            << staticMesh.vertices.size()
+            << " vertices and "
+            << staticMesh.indices.size()
+            << " indices, with separate Cube/Ground Draw ranges.\n";
 
         dx12::StaticMaterialData& staticMaterial =
             staticModel.material;
@@ -1157,11 +1296,49 @@ int main()
             );
         }
 
+        constexpr UINT shadowMapWidth = 2048;
+        constexpr UINT shadowMapHeight = 2048;
+        D3D12_RESOURCE_DESC shadowMapDescription{};
+        shadowMapDescription.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        shadowMapDescription.Alignment = 0;
+        shadowMapDescription.Width = shadowMapWidth;
+        shadowMapDescription.Height = shadowMapHeight;
+        shadowMapDescription.DepthOrArraySize = 1;
+        shadowMapDescription.MipLevels = 1;
+        shadowMapDescription.Format = DXGI_FORMAT_R32_TYPELESS;
+        shadowMapDescription.SampleDesc.Count = 1;
+        shadowMapDescription.SampleDesc.Quality = 0;
+        shadowMapDescription.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        shadowMapDescription.Flags =
+            D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+        D3D12_CLEAR_VALUE shadowMapClearValue{};
+        shadowMapClearValue.Format = DXGI_FORMAT_D32_FLOAT;
+        shadowMapClearValue.DepthStencil.Depth = 1.0F;
+        shadowMapClearValue.DepthStencil.Stencil = 0;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> shadowMap;
+        dx12::ThrowIfFailed(
+            device->CreateCommittedResource(
+                &vertexDefaultHeapProperties,
+                D3D12_HEAP_FLAG_NONE,
+                &shadowMapDescription,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                &shadowMapClearValue,
+                IID_PPV_ARGS(shadowMap.GetAddressOf())
+            ),
+            "CreateCommittedResource for Directional Shadow Map"
+        );
+        dx12::ThrowIfFailed(
+            shadowMap->SetName(L"Directional Shadow Map"),
+            "SetName for Directional Shadow Map"
+        );
+
         D3D12_DESCRIPTOR_HEAP_DESC materialSrvHeapDescription{};
         materialSrvHeapDescription.Type =
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         materialSrvHeapDescription.NumDescriptors =
-            static_cast<UINT>(materialTextures.size());
+            static_cast<UINT>(materialTextures.size()) + 1U;
         materialSrvHeapDescription.Flags =
             D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
@@ -1174,8 +1351,8 @@ int main()
             "CreateDescriptorHeap for glTF material SRVs"
         );
         dx12::ThrowIfFailed(
-            materialSrvHeap->SetName(L"glTF Material SRV Heap"),
-            "SetName for glTF material SRV heap"
+            materialSrvHeap->SetName(L"Material and Shadow SRV Heap"),
+            "SetName for Material and Shadow SRV heap"
         );
 
         const UINT materialSrvDescriptorSize =
@@ -1202,6 +1379,28 @@ int main()
             );
             materialSrvHandle.ptr += materialSrvDescriptorSize;
         }
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC shadowSrvDescription{};
+        shadowSrvDescription.Format = DXGI_FORMAT_R32_FLOAT;
+        shadowSrvDescription.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        shadowSrvDescription.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        shadowSrvDescription.Texture2D.MostDetailedMip = 0;
+        shadowSrvDescription.Texture2D.MipLevels = 1;
+        shadowSrvDescription.Texture2D.PlaneSlice = 0;
+        shadowSrvDescription.Texture2D.ResourceMinLODClamp = 0.0F;
+        device->CreateShaderResourceView(
+            shadowMap.Get(),
+            &shadowSrvDescription,
+            materialSrvHandle
+        );
+
+        std::cout
+            << "Directional Shadow Map and SRV created: "
+            << shadowMapWidth
+            << " x "
+            << shadowMapHeight
+            << ", R32_TYPELESS resource / R32_FLOAT SRV.\n";
 
         // Copy the CPU vertex array into the temporary upload resource. The
         // GPU copy into triangleVertexBuffer is recorded after the main
@@ -1582,6 +1781,41 @@ int main()
             << "Triangle graphics pipeline state "
             "created successfully.\n";
 
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC shadowPipelineDescription =
+            pipelineDescription;
+        shadowPipelineDescription.VS = shadowVertexShaderBytecode;
+        shadowPipelineDescription.PS = {};
+        shadowPipelineDescription.NumRenderTargets = 0;
+        for (DXGI_FORMAT& rtvFormat :
+             shadowPipelineDescription.RTVFormats)
+        {
+            rtvFormat = DXGI_FORMAT_UNKNOWN;
+        }
+        shadowPipelineDescription.RasterizerState.DepthBias = 1000;
+        shadowPipelineDescription.RasterizerState.DepthBiasClamp = 0.01F;
+        shadowPipelineDescription.RasterizerState.SlopeScaledDepthBias =
+            1.5F;
+
+        Microsoft::WRL::ComPtr<ID3D12PipelineState>
+            shadowPipelineState;
+        dx12::ThrowIfFailed(
+            device->CreateGraphicsPipelineState(
+                &shadowPipelineDescription,
+                IID_PPV_ARGS(shadowPipelineState.GetAddressOf())
+            ),
+            "CreateGraphicsPipelineState for Directional Shadow Pass"
+        );
+        dx12::ThrowIfFailed(
+            shadowPipelineState->SetName(
+                L"Directional Shadow Depth Pipeline State"
+            ),
+            "SetName for Directional Shadow Depth Pipeline State"
+        );
+
+        std::cout
+            << "Directional Shadow depth-only PSO created: D32, Back Cull, "
+               "DepthBias=1000, SlopeScaledDepthBias=1.5.\n";
+
 
 
 
@@ -1746,7 +1980,7 @@ int main()
         D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDescription{};
         dsvHeapDescription.Type =
             D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-        dsvHeapDescription.NumDescriptors = 1;
+        dsvHeapDescription.NumDescriptors = 2;
         dsvHeapDescription.Flags =
             D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
         dsvHeapDescription.NodeMask = 0;
@@ -1769,6 +2003,29 @@ int main()
 
         const D3D12_CPU_DESCRIPTOR_HANDLE depthStencilView =
             dsvHeap->GetCPUDescriptorHandleForHeapStart();
+
+        const UINT dsvDescriptorSize =
+            device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_DSV
+            );
+        D3D12_CPU_DESCRIPTOR_HANDLE shadowDepthStencilView =
+            depthStencilView;
+        shadowDepthStencilView.ptr += dsvDescriptorSize;
+
+        D3D12_DEPTH_STENCIL_VIEW_DESC shadowDsvDescription{};
+        shadowDsvDescription.Format = DXGI_FORMAT_D32_FLOAT;
+        shadowDsvDescription.ViewDimension =
+            D3D12_DSV_DIMENSION_TEXTURE2D;
+        shadowDsvDescription.Flags = D3D12_DSV_FLAG_NONE;
+        shadowDsvDescription.Texture2D.MipSlice = 0;
+        device->CreateDepthStencilView(
+            shadowMap.Get(),
+            &shadowDsvDescription,
+            shadowDepthStencilView
+        );
+
+        std::cout
+            << "Directional Shadow Map DSV created in DSV heap slot 1.\n";
 
         auto createDepthBuffer =
             [&](UINT width, UINT height)
@@ -1870,9 +2127,9 @@ int main()
             << swapChainHeight
             << ", DXGI_FORMAT_D32_FLOAT.\n";
 
-        // One transform Constant Buffer belongs to each swap-chain/back-buffer
-        // slot. The CPU updates a slot only after that slot's Fence value has
-        // completed, so the GPU never observes the CPU overwriting in-flight data.
+        // One transform resource belongs to each swap-chain/back-buffer slot.
+        // Each resource contains one aligned Cube slot and one aligned Ground
+        // slot. The CPU updates them only after the frame slot's Fence completes.
         std::array<
             Microsoft::WRL::ComPtr<ID3D12Resource>,
             swapChainBufferCount
@@ -1913,7 +2170,7 @@ int main()
         transformConstantBufferDescription.Alignment = 0;
 
         transformConstantBufferDescription.Width =
-            transformConstantBufferSize;
+            transformFrameBufferSize;
 
         transformConstantBufferDescription.Height = 1;
         transformConstantBufferDescription.DepthOrArraySize = 1;
@@ -1993,9 +2250,9 @@ int main()
         std::cout
             << "Created and persistently mapped "
             << swapChainBufferCount
-            << " transform constant buffers, "
-            << transformConstantBufferSize
-            << " bytes each.\n";        
+            << " per-frame transform resources, "
+            << transformFrameBufferSize
+            << " bytes each (2 x 256-byte object slots).\n";
 
         //Command Allocator
         // One command allocator for each swap-chain back buffer.
@@ -2876,6 +3133,35 @@ int main()
                     100.0F
                 );
 
+            const DirectX::XMVECTOR lightRayDirection =
+                DirectX::XMVector3Normalize(
+                    DirectX::XMLoadFloat3(
+                        &directionalLightDirection
+                    )
+                );
+            const DirectX::XMVECTOR lightTarget =
+                DirectX::XMVectorSet(0.0F, -0.2F, 0.0F, 1.0F);
+            const DirectX::XMVECTOR lightPosition =
+                DirectX::XMVectorSubtract(
+                    lightTarget,
+                    DirectX::XMVectorScale(lightRayDirection, 8.0F)
+                );
+            const DirectX::XMMATRIX lightViewMatrix =
+                DirectX::XMMatrixLookToLH(
+                    lightPosition,
+                    lightRayDirection,
+                    DirectX::XMVectorSet(0.0F, 0.0F, 1.0F, 0.0F)
+                );
+            const DirectX::XMMATRIX lightProjectionMatrix =
+                DirectX::XMMatrixOrthographicLH(
+                    10.0F,
+                    10.0F,
+                    0.1F,
+                    20.0F
+                );
+            const DirectX::XMMATRIX lightViewProjectionMatrix =
+                lightViewMatrix * lightProjectionMatrix;
+
             TransformConstants transformConstants{};
 
             DirectX::XMStoreFloat4x4(
@@ -2898,6 +3184,38 @@ int main()
                 normalMatrix
             );
 
+            TransformConstants groundTransformConstants{};
+            const DirectX::XMMATRIX groundModelMatrix =
+                DirectX::XMMatrixIdentity();
+            DirectX::XMStoreFloat4x4(
+                &groundTransformConstants.model,
+                groundModelMatrix
+            );
+            DirectX::XMStoreFloat4x4(
+                &groundTransformConstants.view,
+                viewMatrix
+            );
+            DirectX::XMStoreFloat4x4(
+                &groundTransformConstants.projection,
+                projectionMatrix
+            );
+            DirectX::XMStoreFloat4x4(
+                &groundTransformConstants.normalMatrix,
+                DirectX::XMMatrixIdentity()
+            );
+
+            ShadowConstants shadowConstants{};
+            DirectX::XMStoreFloat4x4(
+                &shadowConstants.lightViewProjection,
+                lightViewProjectionMatrix
+            );
+            shadowConstants.shadowTexelSize = DirectX::XMFLOAT2{
+                1.0F / static_cast<float>(shadowMapWidth),
+                1.0F / static_cast<float>(shadowMapHeight)
+            };
+            shadowConstants.receiverBias = 0.0015F;
+            shadowConstants.padding = 0.0F;
+
             const PbrConstants pbrConstants{
                 .baseColorFactor = staticMaterial.baseColorFactor,
                 .cameraWorldPosition = cameraState.position,
@@ -2912,6 +3230,9 @@ int main()
                 .padding = 0.0F
             };
 
+            PbrConstants groundPbrConstants = pbrConstants;
+            groundPbrConstants.modelHandedness = 1.0F;
+
             std::memcpy(
                 mappedTransformConstantData[
                     currentBackBufferIndex
@@ -2919,6 +3240,19 @@ int main()
                 &transformConstants,
                 sizeof(transformConstants)
             );
+            std::memcpy(
+                mappedTransformConstantData[currentBackBufferIndex] +
+                    transformConstantBufferSize,
+                &groundTransformConstants,
+                sizeof(groundTransformConstants)
+            );
+
+            const D3D12_GPU_VIRTUAL_ADDRESS cubeTransformAddress =
+                transformConstantBuffers[
+                    currentBackBufferIndex
+                ]->GetGPUVirtualAddress();
+            const D3D12_GPU_VIRTUAL_ADDRESS groundTransformAddress =
+                cubeTransformAddress + transformConstantBufferSize;
 
             // The GPU has finished the previous commands stored in this
             // allocator, so its command memory can now be reused.
@@ -2944,6 +3278,101 @@ int main()
             currentBackBufferRtv.ptr +=
                 static_cast<SIZE_T>(currentBackBufferIndex) *
                 static_cast<SIZE_T>(rtvDescriptorSize);
+
+            D3D12_RESOURCE_BARRIER shadowMapToDepthWrite{};
+            shadowMapToDepthWrite.Type =
+                D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            shadowMapToDepthWrite.Flags =
+                D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            shadowMapToDepthWrite.Transition.pResource = shadowMap.Get();
+            shadowMapToDepthWrite.Transition.Subresource =
+                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            shadowMapToDepthWrite.Transition.StateBefore =
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            shadowMapToDepthWrite.Transition.StateAfter =
+                D3D12_RESOURCE_STATE_DEPTH_WRITE;
+            CommandList->ResourceBarrier(1, &shadowMapToDepthWrite);
+
+            const D3D12_VIEWPORT shadowViewport{
+                0.0F,
+                0.0F,
+                static_cast<FLOAT>(shadowMapWidth),
+                static_cast<FLOAT>(shadowMapHeight),
+                0.0F,
+                1.0F
+            };
+            const D3D12_RECT shadowScissorRect{
+                0,
+                0,
+                static_cast<LONG>(shadowMapWidth),
+                static_cast<LONG>(shadowMapHeight)
+            };
+            CommandList->RSSetViewports(1, &shadowViewport);
+            CommandList->RSSetScissorRects(1, &shadowScissorRect);
+            CommandList->OMSetRenderTargets(
+                0,
+                nullptr,
+                FALSE,
+                &shadowDepthStencilView
+            );
+            CommandList->ClearDepthStencilView(
+                shadowDepthStencilView,
+                D3D12_CLEAR_FLAG_DEPTH,
+                1.0F,
+                0,
+                0,
+                nullptr
+            );
+            CommandList->SetGraphicsRootSignature(rootSignature.Get());
+            CommandList->SetPipelineState(shadowPipelineState.Get());
+            CommandList->SetGraphicsRoot32BitConstants(
+                3,
+                20,
+                &shadowConstants,
+                0
+            );
+            CommandList->IASetPrimitiveTopology(
+                D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+            );
+            CommandList->IASetVertexBuffers(
+                0,
+                1,
+                &triangleVertexBufferView
+            );
+            CommandList->IASetIndexBuffer(&triangleIndexBufferView);
+            CommandList->SetGraphicsRootConstantBufferView(
+                0,
+                cubeTransformAddress
+            );
+            CommandList->DrawIndexedInstanced(
+                cubeIndexCount,
+                1,
+                0,
+                0,
+                0
+            );
+            CommandList->SetGraphicsRootConstantBufferView(
+                0,
+                groundTransformAddress
+            );
+            CommandList->DrawIndexedInstanced(
+                groundPlaneIndexCount,
+                1,
+                groundPlaneStartIndex,
+                0,
+                0
+            );
+
+            D3D12_RESOURCE_BARRIER shadowMapToShaderResource =
+                shadowMapToDepthWrite;
+            shadowMapToShaderResource.Transition.StateBefore =
+                D3D12_RESOURCE_STATE_DEPTH_WRITE;
+            shadowMapToShaderResource.Transition.StateAfter =
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            CommandList->ResourceBarrier(
+                1,
+                &shadowMapToShaderResource
+            );
 
             // The swap-chain buffer begins the frame in PRESENT state.
             D3D12_RESOURCE_BARRIER toRenderTargetBarrier{};
@@ -3047,16 +3476,13 @@ int main()
                 trianglePipelineState.Get()
             );
 
-            // Root parameter 0 is the CBV at HLSL register b0.
-            // Select the Constant Buffer owned by the current frame slot.
+            // Root parameter 0 selects the Cube object slot at b0.
             CommandList->SetGraphicsRootConstantBufferView(
                 0,
-                transformConstantBuffers[
-                    currentBackBufferIndex
-                ]->GetGPUVirtualAddress()
+                cubeTransformAddress
             );
 
-            // Root parameter 1 is the three-SRV table mapped to t0-t2.
+            // Root parameter 1 is the four-SRV table mapped to t0-t3.
             CommandList->SetGraphicsRootDescriptorTable(
                 1,
                 materialSrvHeap->GetGPUDescriptorHandleForHeapStart()
@@ -3067,6 +3493,14 @@ int main()
                 2,
                 20,
                 &pbrConstants,
+                0
+            );
+
+            // Root parameter 3 supplies light-space and PCF values at b2.
+            CommandList->SetGraphicsRoot32BitConstants(
+                3,
+                20,
+                &shadowConstants,
                 0
             );
 
@@ -3087,9 +3521,27 @@ int main()
             );
 
             CommandList->DrawIndexedInstanced(
-                static_cast<UINT>(staticMesh.indices.size()),
+                cubeIndexCount,
                 1,
                 0,
+                0,
+                0
+            );
+
+            CommandList->SetGraphicsRootConstantBufferView(
+                0,
+                groundTransformAddress
+            );
+            CommandList->SetGraphicsRoot32BitConstants(
+                2,
+                20,
+                &groundPbrConstants,
+                0
+            );
+            CommandList->DrawIndexedInstanced(
+                groundPlaneIndexCount,
+                1,
+                groundPlaneStartIndex,
                 0,
                 0
             );

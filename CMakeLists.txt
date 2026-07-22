@@ -101,6 +101,10 @@ set(TRIANGLE_PIXEL_SHADER
     "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}/TrianglesPS.cso"
 )
 
+set(SHADOW_VERTEX_SHADER
+    "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}/ShadowVS.cso"
+)
+
 set(DXC_CONFIGURATION_ARGUMENTS
     "$<$<CONFIG:Debug>:-Zi>"
     "$<$<CONFIG:Debug>:-Qembed_debug>"
@@ -144,10 +148,29 @@ add_custom_command(
     COMMAND_EXPAND_LISTS
 )
 
+add_custom_command(
+    OUTPUT "${SHADOW_VERTEX_SHADER}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}"
+    COMMAND "${DXC_EXECUTABLE}"
+        -nologo
+        -HV 2021
+        ${DXC_CONFIGURATION_ARGUMENTS}
+        -E VSShadow
+        -T vs_6_0
+        -Fo "${SHADOW_VERTEX_SHADER}"
+        "${TRIANGLE_SHADER_SOURCE}"
+    DEPENDS "${TRIANGLE_SHADER_SOURCE}"
+    COMMENT "Compiling Triangles.hlsl shadow vertex shader"
+    VERBATIM
+    COMMAND_EXPAND_LISTS
+)
+
 add_custom_target(DX12Shaders
     DEPENDS
         "${TRIANGLE_VERTEX_SHADER}"
         "${TRIANGLE_PIXEL_SHADER}"
+        "${SHADOW_VERTEX_SHADER}"
 )
 
 add_dependencies(DX12EnvironmentCheck DX12Shaders)

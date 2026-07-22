@@ -9,7 +9,9 @@ cbuffer TransformConstants : register(b0)
 Texture2D<float4> baseColorTexture : register(t0);
 Texture2D<float4> normalTexture : register(t1);
 Texture2D<float4> metallicRoughnessTexture : register(t2);
+Texture2D<float> shadowMapTexture : register(t3);
 SamplerState materialSampler : register(s0);
+SamplerComparisonState shadowComparisonSampler : register(s1);
 
 cbuffer PbrConstants : register(b1)
 {
@@ -24,6 +26,14 @@ cbuffer PbrConstants : register(b1)
     float ambientIntensity;
     float modelHandedness;
     float pbrPadding;
+};
+
+cbuffer ShadowConstants : register(b2)
+{
+    row_major float4x4 lightViewProjection;
+    float2 shadowTexelSize;
+    float shadowReceiverBias;
+    float shadowPadding;
 };
 
 static const float Pi = 3.14159265358979323846f;
@@ -43,6 +53,7 @@ struct VertexShaderOutput
     float3 worldNormal : NORMAL;
     float2 textureCoordinates : TEXCOORD;
     float4 worldTangent : TANGENT;
+    float4 lightClipPosition : TEXCOORD1;
 };
 
 VertexShaderOutput VSMain(VertexShaderInput input)
@@ -56,6 +67,7 @@ VertexShaderOutput VSMain(VertexShaderInput input)
     const float4 viewPosition = mul(worldPosition, view);
     output.position = mul(viewPosition, projection);
     output.worldPosition = worldPosition.xyz;
+    output.lightClipPosition = mul(worldPosition, lightViewProjection);
     output.worldNormal = normalize(
         mul(float4(input.normal, 0.0f), normalMatrix).xyz
     );
@@ -66,6 +78,15 @@ VertexShaderOutput VSMain(VertexShaderInput input)
     output.textureCoordinates = input.textureCoordinates;
 
     return output;
+}
+
+float4 VSShadow(VertexShaderInput input) : SV_Position
+{
+    const float4 worldPosition = mul(
+        float4(input.position, 1.0f),
+        model
+    );
+    return mul(worldPosition, lightViewProjection);
 }
 
 float DistributionGgx(float3 normal, float3 halfVector, float roughness)
@@ -132,6 +153,52 @@ float3 NormalizeOrFallback(float3 value, float3 fallback)
     return lengthSquared > 1.0e-8f
         ? value * rsqrt(lengthSquared)
         : fallback;
+}
+
+float CalculateShadowVisibility(
+    float4 lightClipPosition,
+    float3 normal,
+    float3 lightDirection)
+{
+    if (lightClipPosition.w <= 0.0f)
+    {
+        return 1.0f;
+    }
+
+    const float3 lightNdc =
+        lightClipPosition.xyz / lightClipPosition.w;
+    const float2 shadowUv = float2(
+        lightNdc.x * 0.5f + 0.5f,
+        0.5f - lightNdc.y * 0.5f
+    );
+    if (lightNdc.z < 0.0f || lightNdc.z > 1.0f ||
+        any(shadowUv < 0.0f) || any(shadowUv > 1.0f))
+    {
+        return 1.0f;
+    }
+
+    const float slopeFactor =
+        1.0f - saturate(dot(normal, lightDirection));
+    const float comparisonDepth =
+        lightNdc.z - shadowReceiverBias * (1.0f + slopeFactor);
+
+    float visibility = 0.0f;
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+        {
+            const float2 offset =
+                float2((float)x, (float)y) * shadowTexelSize;
+            visibility += shadowMapTexture.SampleCmpLevelZero(
+                shadowComparisonSampler,
+                shadowUv + offset,
+                comparisonDepth
+            );
+        }
+    }
+    return visibility / 9.0f;
 }
 
 float4 PSMain(VertexShaderOutput input) : SV_Target0
@@ -220,12 +287,18 @@ float4 PSMain(VertexShaderOutput input) : SV_Target0
         directionalLightColor * directionalLightIntensity;
     const float3 directLighting =
         (diffuse + specular) * radiance * normalDotLight;
+    const float shadowVisibility = CalculateShadowVisibility(
+        input.lightClipPosition,
+        normal,
+        lightDirection
+    );
 
     // This is a small non-IBL fill term used only until the later IBL/HDR
     // milestones. It prevents unlit dielectric faces from becoming pure black.
     const float3 ambient =
         ambientIntensity * baseColor * (1.0f - metallic);
-    const float3 linearColor = ambient + directLighting;
+    const float3 linearColor =
+        ambient + shadowVisibility * directLighting;
 
     // The current swap chain is UNORM rather than sRGB. Clamp to SDR and
     // explicitly encode linear lighting to sRGB; HDR tone mapping comes later.
