@@ -83,9 +83,19 @@ set(TRIANGLE_SHADER_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/Triangles.hlsl"
 )
 
+set(TONE_MAPPING_SHADER_SOURCE
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/ToneMapping.hlsl"
+)
+
 if(NOT EXISTS "${TRIANGLE_SHADER_SOURCE}")
     message(FATAL_ERROR
         "Triangle shader source was not found: ${TRIANGLE_SHADER_SOURCE}"
+    )
+endif()
+
+if(NOT EXISTS "${TONE_MAPPING_SHADER_SOURCE}")
+    message(FATAL_ERROR
+        "Tone-mapping shader source was not found: ${TONE_MAPPING_SHADER_SOURCE}"
     )
 endif()
 
@@ -97,12 +107,20 @@ set(TRIANGLE_VERTEX_SHADER
     "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}/TrianglesVS.cso"
 )
 
-set(TRIANGLE_PIXEL_SHADER
-    "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}/TrianglesPS.cso"
+set(HDR_PIXEL_SHADER
+    "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}/HdrForwardPS.cso"
 )
 
 set(SHADOW_VERTEX_SHADER
     "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}/ShadowVS.cso"
+)
+
+set(TONE_MAPPING_VERTEX_SHADER
+    "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}/ToneMappingVS.cso"
+)
+
+set(TONE_MAPPING_PIXEL_SHADER
+    "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}/ToneMappingPS.cso"
 )
 
 set(DXC_CONFIGURATION_ARGUMENTS
@@ -131,24 +149,6 @@ add_custom_command(
 )
 
 add_custom_command(
-    OUTPUT "${TRIANGLE_PIXEL_SHADER}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory
-        "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}"
-    COMMAND "${DXC_EXECUTABLE}"
-        -nologo
-        -HV 2021
-        ${DXC_CONFIGURATION_ARGUMENTS}
-        -E PSMain
-        -T ps_6_0
-        -Fo "${TRIANGLE_PIXEL_SHADER}"
-        "${TRIANGLE_SHADER_SOURCE}"
-    DEPENDS "${TRIANGLE_SHADER_SOURCE}"
-    COMMENT "Compiling Triangles.hlsl pixel shader"
-    VERBATIM
-    COMMAND_EXPAND_LISTS
-)
-
-add_custom_command(
     OUTPUT "${SHADOW_VERTEX_SHADER}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory
         "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}"
@@ -166,11 +166,67 @@ add_custom_command(
     COMMAND_EXPAND_LISTS
 )
 
+add_custom_command(
+    OUTPUT "${TONE_MAPPING_VERTEX_SHADER}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}"
+    COMMAND "${DXC_EXECUTABLE}"
+        -nologo
+        -HV 2021
+        ${DXC_CONFIGURATION_ARGUMENTS}
+        -E VSMain
+        -T vs_6_0
+        -Fo "${TONE_MAPPING_VERTEX_SHADER}"
+        "${TONE_MAPPING_SHADER_SOURCE}"
+    DEPENDS "${TONE_MAPPING_SHADER_SOURCE}"
+    COMMENT "Compiling ToneMapping.hlsl fullscreen vertex shader"
+    VERBATIM
+    COMMAND_EXPAND_LISTS
+)
+
+add_custom_command(
+    OUTPUT "${TONE_MAPPING_PIXEL_SHADER}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}"
+    COMMAND "${DXC_EXECUTABLE}"
+        -nologo
+        -HV 2021
+        ${DXC_CONFIGURATION_ARGUMENTS}
+        -E PSMain
+        -T ps_6_0
+        -Fo "${TONE_MAPPING_PIXEL_SHADER}"
+        "${TONE_MAPPING_SHADER_SOURCE}"
+    DEPENDS "${TONE_MAPPING_SHADER_SOURCE}"
+    COMMENT "Compiling ToneMapping.hlsl pixel shader"
+    VERBATIM
+    COMMAND_EXPAND_LISTS
+)
+
+add_custom_command(
+    OUTPUT "${HDR_PIXEL_SHADER}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "${TRIANGLE_SHADER_OUTPUT_DIRECTORY}"
+    COMMAND "${DXC_EXECUTABLE}"
+        -nologo
+        -HV 2021
+        ${DXC_CONFIGURATION_ARGUMENTS}
+        -E PSMainHdr
+        -T ps_6_0
+        -Fo "${HDR_PIXEL_SHADER}"
+        "${TRIANGLE_SHADER_SOURCE}"
+    DEPENDS "${TRIANGLE_SHADER_SOURCE}"
+    COMMENT "Compiling Triangles.hlsl HDR forward pixel shader"
+    VERBATIM
+    COMMAND_EXPAND_LISTS
+)
+
 add_custom_target(DX12Shaders
     DEPENDS
         "${TRIANGLE_VERTEX_SHADER}"
-        "${TRIANGLE_PIXEL_SHADER}"
         "${SHADOW_VERTEX_SHADER}"
+        "${HDR_PIXEL_SHADER}"
+        "${TONE_MAPPING_VERTEX_SHADER}"
+        "${TONE_MAPPING_PIXEL_SHADER}"
 )
 
 add_dependencies(DX12EnvironmentCheck DX12Shaders)

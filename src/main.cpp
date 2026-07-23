@@ -10,6 +10,7 @@
 #include <dxgi1_4.h>
 #include <DirectXMath.h>
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -78,6 +79,17 @@ struct ShadowConstants final
 static_assert(
     sizeof(ShadowConstants) == sizeof(float) * 20,
     "Shadow root constants must contain exactly twenty 32-bit values."
+);
+
+struct ToneMappingConstants final
+{
+    float exposure = 1.0F;
+    float padding[3]{};
+};
+
+static_assert(
+    sizeof(ToneMappingConstants) == sizeof(float) * 4,
+    "Tone-mapping root constants must contain exactly four 32-bit values."
 );
 
 struct MaterialTextureUpload final
@@ -553,24 +565,40 @@ int main()
         L"shaders" /
         L"TrianglesVS.cso";
         
-        const std::filesystem::path pixelShaderPath =
-        executableDirectory /
-        L"shaders" /
-        L"TrianglesPS.cso";
-
         const std::filesystem::path shadowVertexShaderPath =
         executableDirectory /
         L"shaders" /
         L"ShadowVS.cso";
+
+        const std::filesystem::path hdrPixelShaderPath =
+        executableDirectory /
+        L"shaders" /
+        L"HdrForwardPS.cso";
+
+        const std::filesystem::path toneMappingVertexShaderPath =
+        executableDirectory /
+        L"shaders" /
+        L"ToneMappingVS.cso";
+
+        const std::filesystem::path toneMappingPixelShaderPath =
+        executableDirectory /
+        L"shaders" /
+        L"ToneMappingPS.cso";
         
         const std::vector<char> vertexShaderBytes =
             ReadBinaryFile(vertexShaderPath);
 
-        const std::vector<char> pixelShaderBytes =
-            ReadBinaryFile(pixelShaderPath);
-
         const std::vector<char> shadowVertexShaderBytes =
             ReadBinaryFile(shadowVertexShaderPath);
+
+        const std::vector<char> hdrPixelShaderBytes =
+            ReadBinaryFile(hdrPixelShaderPath);
+
+        const std::vector<char> toneMappingVertexShaderBytes =
+            ReadBinaryFile(toneMappingVertexShaderPath);
+
+        const std::vector<char> toneMappingPixelShaderBytes =
+            ReadBinaryFile(toneMappingPixelShaderPath);
 
         std::cout
             << "Vertex shader loaded: "
@@ -578,13 +606,20 @@ int main()
             << " bytes.\n";
 
         std::cout
-            << "Pixel shader loaded: "
-            << pixelShaderBytes.size()
+            << "Shadow vertex shader loaded: "
+            << shadowVertexShaderBytes.size()
             << " bytes.\n";
 
         std::cout
-            << "Shadow vertex shader loaded: "
-            << shadowVertexShaderBytes.size()
+            << "HDR forward pixel shader loaded: "
+            << hdrPixelShaderBytes.size()
+            << " bytes.\n";
+
+        std::cout
+            << "Tone-mapping shaders loaded: VS="
+            << toneMappingVertexShaderBytes.size()
+            << " bytes, PS="
+            << toneMappingPixelShaderBytes.size()
             << " bytes.\n";
 
         const D3D12_SHADER_BYTECODE vertexShaderBytecode{
@@ -592,14 +627,24 @@ int main()
             .BytecodeLength = vertexShaderBytes.size()
         };
 
-        const D3D12_SHADER_BYTECODE pixelShaderBytecode{
-            .pShaderBytecode = pixelShaderBytes.data(),
-            .BytecodeLength = pixelShaderBytes.size()
-        };
-
         const D3D12_SHADER_BYTECODE shadowVertexShaderBytecode{
             .pShaderBytecode = shadowVertexShaderBytes.data(),
             .BytecodeLength = shadowVertexShaderBytes.size()
+        };
+
+        const D3D12_SHADER_BYTECODE hdrPixelShaderBytecode{
+            .pShaderBytecode = hdrPixelShaderBytes.data(),
+            .BytecodeLength = hdrPixelShaderBytes.size()
+        };
+
+        const D3D12_SHADER_BYTECODE toneMappingVertexShaderBytecode{
+            .pShaderBytecode = toneMappingVertexShaderBytes.data(),
+            .BytecodeLength = toneMappingVertexShaderBytes.size()
+        };
+
+        const D3D12_SHADER_BYTECODE toneMappingPixelShaderBytecode{
+            .pShaderBytecode = toneMappingPixelShaderBytes.data(),
+            .BytecodeLength = toneMappingPixelShaderBytes.size()
         };
 
         // Root parameter 0 keeps the per-frame transform CBV at b0. Root
@@ -778,6 +823,111 @@ int main()
 
         std::cout
         << "Triangle root signature created successfully.\n";
+
+        // The presentation pass has an intentionally small binding contract:
+        // one HDR SRV at t0 and four root constants at b0 (Exposure + padding).
+        D3D12_DESCRIPTOR_RANGE toneMappingTextureRange{};
+        toneMappingTextureRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        toneMappingTextureRange.NumDescriptors = 1;
+        toneMappingTextureRange.BaseShaderRegister = 0;
+        toneMappingTextureRange.RegisterSpace = 0;
+        toneMappingTextureRange.OffsetInDescriptorsFromTableStart =
+            D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+        std::array<D3D12_ROOT_PARAMETER, 2> toneMappingRootParameters{};
+        toneMappingRootParameters[0].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        toneMappingRootParameters[0].DescriptorTable.NumDescriptorRanges = 1;
+        toneMappingRootParameters[0].DescriptorTable.pDescriptorRanges =
+            &toneMappingTextureRange;
+        toneMappingRootParameters[0].ShaderVisibility =
+            D3D12_SHADER_VISIBILITY_PIXEL;
+
+        toneMappingRootParameters[1].ParameterType =
+            D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        toneMappingRootParameters[1].Constants.ShaderRegister = 0;
+        toneMappingRootParameters[1].Constants.RegisterSpace = 0;
+        toneMappingRootParameters[1].Constants.Num32BitValues = 4;
+        toneMappingRootParameters[1].ShaderVisibility =
+            D3D12_SHADER_VISIBILITY_PIXEL;
+
+        D3D12_STATIC_SAMPLER_DESC toneMappingSampler{};
+        toneMappingSampler.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        toneMappingSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        toneMappingSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        toneMappingSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        toneMappingSampler.MipLODBias = 0.0F;
+        toneMappingSampler.MaxAnisotropy = 1;
+        toneMappingSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        toneMappingSampler.BorderColor =
+            D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+        toneMappingSampler.MinLOD = 0.0F;
+        toneMappingSampler.MaxLOD = D3D12_FLOAT32_MAX;
+        toneMappingSampler.ShaderRegister = 0;
+        toneMappingSampler.RegisterSpace = 0;
+        toneMappingSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        D3D12_ROOT_SIGNATURE_DESC toneMappingRootSignatureDescription{};
+        toneMappingRootSignatureDescription.NumParameters =
+            static_cast<UINT>(toneMappingRootParameters.size());
+        toneMappingRootSignatureDescription.pParameters =
+            toneMappingRootParameters.data();
+        toneMappingRootSignatureDescription.NumStaticSamplers = 1;
+        toneMappingRootSignatureDescription.pStaticSamplers =
+            &toneMappingSampler;
+        toneMappingRootSignatureDescription.Flags =
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+        Microsoft::WRL::ComPtr<ID3DBlob>
+            serializedToneMappingRootSignature;
+        Microsoft::WRL::ComPtr<ID3DBlob>
+            toneMappingRootSignatureDiagnostics;
+        const HRESULT toneMappingRootSignatureSerializationResult =
+            D3D12SerializeRootSignature(
+                &toneMappingRootSignatureDescription,
+                D3D_ROOT_SIGNATURE_VERSION_1,
+                serializedToneMappingRootSignature.GetAddressOf(),
+                toneMappingRootSignatureDiagnostics.GetAddressOf()
+            );
+
+        if (toneMappingRootSignatureDiagnostics != nullptr &&
+            toneMappingRootSignatureDiagnostics->GetBufferSize() > 0)
+        {
+            std::cerr << "Tone-mapping root signature diagnostics:\n";
+            std::cerr.write(
+                static_cast<const char*>(
+                    toneMappingRootSignatureDiagnostics->GetBufferPointer()
+                ),
+                static_cast<std::streamsize>(
+                    toneMappingRootSignatureDiagnostics->GetBufferSize()
+                )
+            );
+            std::cerr << '\n';
+        }
+
+        dx12::ThrowIfFailed(
+            toneMappingRootSignatureSerializationResult,
+            "D3D12SerializeRootSignature for Tone Mapping"
+        );
+
+        Microsoft::WRL::ComPtr<ID3D12RootSignature>
+            toneMappingRootSignature;
+        dx12::ThrowIfFailed(
+            device->CreateRootSignature(
+                0,
+                serializedToneMappingRootSignature->GetBufferPointer(),
+                serializedToneMappingRootSignature->GetBufferSize(),
+                IID_PPV_ARGS(toneMappingRootSignature.GetAddressOf())
+            ),
+            "CreateRootSignature for Tone Mapping"
+        );
+        dx12::ThrowIfFailed(
+            toneMappingRootSignature->SetName(L"Tone Mapping Root Signature"),
+            "SetName for Tone Mapping Root Signature"
+        );
+
+        std::cout
+            << "Tone-mapping root signature created: t0 HDR SRV, b0 Exposure.\n";
 
         // Load one deliberately constrained glTF 2.0 static mesh. The loader
         // produces the same 48-byte vertex layout already verified by the
@@ -1712,7 +1862,7 @@ int main()
         pipelineDescription.VS =
             vertexShaderBytecode;
         pipelineDescription.PS =
-            pixelShaderBytecode;
+            hdrPixelShaderBytecode;
 
         pipelineDescription.BlendState =
             blendDescription;
@@ -1738,7 +1888,7 @@ int main()
         pipelineDescription.NumRenderTargets = 1;
 
         pipelineDescription.RTVFormats[0] =
-            DXGI_FORMAT_R8G8B8A8_UNORM;
+            DXGI_FORMAT_R16G16B16A16_FLOAT;
 
         pipelineDescription.DSVFormat =
             DXGI_FORMAT_D32_FLOAT;
@@ -1758,28 +1908,68 @@ int main()
             D3D12_PIPELINE_STATE_FLAG_NONE;
 
         Microsoft::WRL::ComPtr<ID3D12PipelineState>
-            trianglePipelineState;
-
+            hdrPipelineState;
         dx12::ThrowIfFailed(
             device->CreateGraphicsPipelineState(
                 &pipelineDescription,
-                IID_PPV_ARGS(
-                    trianglePipelineState.GetAddressOf()
-                )
+                IID_PPV_ARGS(hdrPipelineState.GetAddressOf())
             ),
-            "ID3D12Device::CreateGraphicsPipelineState"
+            "CreateGraphicsPipelineState for HDR Forward Pass"
         );
-
         dx12::ThrowIfFailed(
-            trianglePipelineState->SetName(
-                L"Triangle Graphics Pipeline State"
-            ),
-            "ID3D12PipelineState::SetName"
+            hdrPipelineState->SetName(L"HDR Forward Pipeline State"),
+            "SetName for HDR Forward Pipeline State"
         );
 
         std::cout
-            << "Triangle graphics pipeline state "
-            "created successfully.\n";
+            << "HDR Forward PSO created: R16G16B16A16_FLOAT RTV.\n";
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC toneMappingPipelineDescription{};
+        toneMappingPipelineDescription.pRootSignature =
+            toneMappingRootSignature.Get();
+        toneMappingPipelineDescription.VS = toneMappingVertexShaderBytecode;
+        toneMappingPipelineDescription.PS = toneMappingPixelShaderBytecode;
+        toneMappingPipelineDescription.BlendState = blendDescription;
+        toneMappingPipelineDescription.RasterizerState = rasterizerDescription;
+        toneMappingPipelineDescription.RasterizerState.CullMode =
+            D3D12_CULL_MODE_NONE;
+        toneMappingPipelineDescription.DepthStencilState =
+            depthStencilDescription;
+        toneMappingPipelineDescription.DepthStencilState.DepthEnable = FALSE;
+        toneMappingPipelineDescription.DepthStencilState.DepthWriteMask =
+            D3D12_DEPTH_WRITE_MASK_ZERO;
+        toneMappingPipelineDescription.DepthStencilState.StencilEnable = FALSE;
+        toneMappingPipelineDescription.SampleMask = UINT_MAX;
+        toneMappingPipelineDescription.InputLayout = {nullptr, 0};
+        toneMappingPipelineDescription.PrimitiveTopologyType =
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        toneMappingPipelineDescription.NumRenderTargets = 1;
+        toneMappingPipelineDescription.RTVFormats[0] =
+            DXGI_FORMAT_R8G8B8A8_UNORM;
+        toneMappingPipelineDescription.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        toneMappingPipelineDescription.SampleDesc.Count = 1;
+        toneMappingPipelineDescription.SampleDesc.Quality = 0;
+        toneMappingPipelineDescription.IBStripCutValue =
+            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+        toneMappingPipelineDescription.Flags =
+            D3D12_PIPELINE_STATE_FLAG_NONE;
+
+        Microsoft::WRL::ComPtr<ID3D12PipelineState>
+            toneMappingPipelineState;
+        dx12::ThrowIfFailed(
+            device->CreateGraphicsPipelineState(
+                &toneMappingPipelineDescription,
+                IID_PPV_ARGS(toneMappingPipelineState.GetAddressOf())
+            ),
+            "CreateGraphicsPipelineState for Tone Mapping"
+        );
+        dx12::ThrowIfFailed(
+            toneMappingPipelineState->SetName(L"Tone Mapping Pipeline State"),
+            "SetName for Tone Mapping Pipeline State"
+        );
+
+        std::cout
+            << "Tone-mapping PSO created: fullscreen triangle to SDR RTV.\n";
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC shadowPipelineDescription =
             pipelineDescription;
@@ -1909,7 +2099,7 @@ int main()
         
         D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
         heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        heapDesc.NumDescriptors = swapChainBufferCount;
+        heapDesc.NumDescriptors = swapChainBufferCount + 1U;
         heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
         heapDesc.NodeMask = 0;
         dx12::ThrowIfFailed(
@@ -1974,6 +2164,118 @@ int main()
                 static_cast<SIZE_T>(rtvDescriptorSize);
         }
         std::cout << "RTV Create Success" << "\n";
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE hdrRenderTargetView =
+            rtvCreationHandle;
+
+        D3D12_DESCRIPTOR_HEAP_DESC hdrSrvHeapDescription{};
+        hdrSrvHeapDescription.Type =
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hdrSrvHeapDescription.NumDescriptors = 1;
+        hdrSrvHeapDescription.Flags =
+            D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> hdrSrvHeap;
+        dx12::ThrowIfFailed(
+            device->CreateDescriptorHeap(
+                &hdrSrvHeapDescription,
+                IID_PPV_ARGS(hdrSrvHeap.GetAddressOf())
+            ),
+            "CreateDescriptorHeap for HDR SRV"
+        );
+        dx12::ThrowIfFailed(
+            hdrSrvHeap->SetName(L"HDR SRV Heap"),
+            "SetName for HDR SRV Heap"
+        );
+
+        auto createHdrRenderTarget =
+            [&](UINT width, UINT height)
+            {
+                if (width == 0 || height == 0)
+                {
+                    throw std::runtime_error(
+                        "HDR render-target dimensions must be positive."
+                    );
+                }
+
+                D3D12_HEAP_PROPERTIES heapProperties{};
+                heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+                heapProperties.CreationNodeMask = 1;
+                heapProperties.VisibleNodeMask = 1;
+
+                D3D12_RESOURCE_DESC description{};
+                description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                description.Width = width;
+                description.Height = height;
+                description.DepthOrArraySize = 1;
+                description.MipLevels = 1;
+                description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                description.SampleDesc.Count = 1;
+                description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+                description.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+                D3D12_CLEAR_VALUE clearValue{};
+                clearValue.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                clearValue.Color[0] = 0.01F;
+                clearValue.Color[1] = 0.02F;
+                clearValue.Color[2] = 0.04F;
+                clearValue.Color[3] = 1.0F;
+
+                Microsoft::WRL::ComPtr<ID3D12Resource> createdTarget;
+                dx12::ThrowIfFailed(
+                    device->CreateCommittedResource(
+                        &heapProperties,
+                        D3D12_HEAP_FLAG_NONE,
+                        &description,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                        &clearValue,
+                        IID_PPV_ARGS(createdTarget.GetAddressOf())
+                    ),
+                    "CreateCommittedResource for HDR Render Target"
+                );
+                dx12::ThrowIfFailed(
+                    createdTarget->SetName(L"HDR Forward Render Target"),
+                    "SetName for HDR Forward Render Target"
+                );
+
+                D3D12_RENDER_TARGET_VIEW_DESC rtvDescription{};
+                rtvDescription.Format =
+                    DXGI_FORMAT_R16G16B16A16_FLOAT;
+                rtvDescription.ViewDimension =
+                    D3D12_RTV_DIMENSION_TEXTURE2D;
+                rtvDescription.Texture2D.MipSlice = 0;
+                rtvDescription.Texture2D.PlaneSlice = 0;
+                device->CreateRenderTargetView(
+                    createdTarget.Get(),
+                    &rtvDescription,
+                    hdrRenderTargetView
+                );
+
+                D3D12_SHADER_RESOURCE_VIEW_DESC srvDescription{};
+                srvDescription.Format =
+                    DXGI_FORMAT_R16G16B16A16_FLOAT;
+                srvDescription.ViewDimension =
+                    D3D12_SRV_DIMENSION_TEXTURE2D;
+                srvDescription.Shader4ComponentMapping =
+                    D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                srvDescription.Texture2D.MostDetailedMip = 0;
+                srvDescription.Texture2D.MipLevels = 1;
+                device->CreateShaderResourceView(
+                    createdTarget.Get(),
+                    &srvDescription,
+                    hdrSrvHeap->GetCPUDescriptorHandleForHeapStart()
+                );
+
+                std::cout
+                    << "HDR Render Target created: "
+                    << width
+                    << " x "
+                    << height
+                    << ", DXGI_FORMAT_R16G16B16A16_FLOAT.\n";
+                return createdTarget;
+            };
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> hdrRenderTarget =
+            createHdrRenderTarget(swapChainWidth, swapChainHeight);
 
         // One CPU-only DSV descriptor is sufficient because this renderer uses
         // one depth texture for the serial work submitted to the direct queue.
@@ -2572,6 +2874,14 @@ int main()
         constexpr float maximumFrameDeltaSeconds = 0.1F;
         constexpr float maximumPitchRadians =
             DirectX::XM_PIDIV2 - 0.01F;
+        float exposure = 1.0F;
+        constexpr float minimumExposure = 0.05F;
+        constexpr float maximumExposure = 16.0F;
+        constexpr float exposureStopsPerSecond = 1.5F;
+
+        std::cout
+            << "Exposure controls: [ decreases, ] increases, Home resets; "
+               "range=[0.05, 16.0], initial=1.0.\n";
 
         auto previousFrameTime =
             std::chrono::steady_clock::now();
@@ -2712,8 +3022,9 @@ int main()
                     }
 
                     // The queue drain above proves that no in-flight draw can
-                    // still reference the old-size depth texture.
+                    // still reference the old-size depth or HDR textures.
                     depthBuffer.Reset();
+                    hdrRenderTarget.Reset();
 
                     dx12::ThrowIfFailed(
                         _IDXGISwapChain3->ResizeBuffers(
@@ -2773,6 +3084,10 @@ int main()
                     // ResizeBuffers only recreates color back buffers. The
                     // application must explicitly recreate its depth texture.
                     depthBuffer = createDepthBuffer(
+                        swapChainWidth,
+                        swapChainHeight
+                    );
+                    hdrRenderTarget = createHdrRenderTarget(
                         swapChainWidth,
                         swapChainHeight
                     );
@@ -2878,6 +3193,34 @@ int main()
 
             const bool rendererHasFocus =
                 GetForegroundWindow() == window;
+
+            if (rendererHasFocus)
+            {
+                if ((GetAsyncKeyState(VK_OEM_4) & 0x8000) != 0)
+                {
+                    exposure *= std::exp2(
+                        -exposureStopsPerSecond * frameDeltaSeconds
+                    );
+                }
+
+                if ((GetAsyncKeyState(VK_OEM_6) & 0x8000) != 0)
+                {
+                    exposure *= std::exp2(
+                        exposureStopsPerSecond * frameDeltaSeconds
+                    );
+                }
+
+                if ((GetAsyncKeyState(VK_HOME) & 0x8000) != 0)
+                {
+                    exposure = 1.0F;
+                }
+
+                exposure = std::clamp(
+                    exposure,
+                    minimumExposure,
+                    maximumExposure
+                );
+            }
 
             if (rendererHasFocus &&
                 (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0)
@@ -3374,6 +3717,133 @@ int main()
                 &shadowMapToShaderResource
             );
 
+            D3D12_RESOURCE_BARRIER hdrToRenderTarget{};
+            hdrToRenderTarget.Type =
+                D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            hdrToRenderTarget.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            hdrToRenderTarget.Transition.pResource = hdrRenderTarget.Get();
+            hdrToRenderTarget.Transition.Subresource =
+                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            hdrToRenderTarget.Transition.StateBefore =
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            hdrToRenderTarget.Transition.StateAfter =
+                D3D12_RESOURCE_STATE_RENDER_TARGET;
+            CommandList->ResourceBarrier(1, &hdrToRenderTarget);
+
+            const D3D12_VIEWPORT hdrViewport{
+                0.0F,
+                0.0F,
+                static_cast<FLOAT>(swapChainWidth),
+                static_cast<FLOAT>(swapChainHeight),
+                0.0F,
+                1.0F
+            };
+            const D3D12_RECT hdrScissorRect{
+                0,
+                0,
+                static_cast<LONG>(swapChainWidth),
+                static_cast<LONG>(swapChainHeight)
+            };
+            CommandList->RSSetViewports(1, &hdrViewport);
+            CommandList->RSSetScissorRects(1, &hdrScissorRect);
+            CommandList->OMSetRenderTargets(
+                1,
+                &hdrRenderTargetView,
+                FALSE,
+                &depthStencilView
+            );
+            constexpr FLOAT hdrClearColor[4] = {
+                0.01F,
+                0.02F,
+                0.04F,
+                1.0F
+            };
+            CommandList->ClearRenderTargetView(
+                hdrRenderTargetView,
+                hdrClearColor,
+                0,
+                nullptr
+            );
+            CommandList->ClearDepthStencilView(
+                depthStencilView,
+                D3D12_CLEAR_FLAG_DEPTH,
+                1.0F,
+                0,
+                0,
+                nullptr
+            );
+
+            ID3D12DescriptorHeap* const hdrPassDescriptorHeaps[] = {
+                materialSrvHeap.Get()
+            };
+            CommandList->SetDescriptorHeaps(1, hdrPassDescriptorHeaps);
+            CommandList->SetGraphicsRootSignature(rootSignature.Get());
+            CommandList->SetPipelineState(hdrPipelineState.Get());
+            CommandList->SetGraphicsRootDescriptorTable(
+                1,
+                materialSrvHeap->GetGPUDescriptorHandleForHeapStart()
+            );
+            CommandList->SetGraphicsRoot32BitConstants(
+                3,
+                20,
+                &shadowConstants,
+                0
+            );
+            CommandList->IASetPrimitiveTopology(
+                D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+            );
+            CommandList->IASetVertexBuffers(
+                0,
+                1,
+                &triangleVertexBufferView
+            );
+            CommandList->IASetIndexBuffer(&triangleIndexBufferView);
+
+            CommandList->SetGraphicsRootConstantBufferView(
+                0,
+                cubeTransformAddress
+            );
+            CommandList->SetGraphicsRoot32BitConstants(
+                2,
+                20,
+                &pbrConstants,
+                0
+            );
+            CommandList->DrawIndexedInstanced(
+                cubeIndexCount,
+                1,
+                0,
+                0,
+                0
+            );
+            CommandList->SetGraphicsRootConstantBufferView(
+                0,
+                groundTransformAddress
+            );
+            CommandList->SetGraphicsRoot32BitConstants(
+                2,
+                20,
+                &groundPbrConstants,
+                0
+            );
+            CommandList->DrawIndexedInstanced(
+                groundPlaneIndexCount,
+                1,
+                groundPlaneStartIndex,
+                0,
+                0
+            );
+
+            D3D12_RESOURCE_BARRIER hdrToShaderResource =
+                hdrToRenderTarget;
+            hdrToShaderResource.Transition.StateBefore =
+                D3D12_RESOURCE_STATE_RENDER_TARGET;
+            hdrToShaderResource.Transition.StateAfter =
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            CommandList->ResourceBarrier(1, &hdrToShaderResource);
+
+            // The presentation pass consumes the completed HDR texture and
+            // writes the tone-mapped, display-encoded result to the swap chain.
             // The swap-chain buffer begins the frame in PRESENT state.
             D3D12_RESOURCE_BARRIER toRenderTargetBarrier{};
             toRenderTargetBarrier.Type =
@@ -3429,7 +3899,7 @@ int main()
                 1,
                 &currentBackBufferRtv,
                 FALSE,
-                &depthStencilView
+                nullptr
             );
 
             constexpr FLOAT clearColor[4] = {
@@ -3446,21 +3916,10 @@ int main()
                 nullptr
             );
 
-            // Clear 1.0 represents the farthest depth in the current normal-Z
-            // convention. Stencil is not present in DXGI_FORMAT_D32_FLOAT.
-            CommandList->ClearDepthStencilView(
-                depthStencilView,
-                D3D12_CLEAR_FLAG_DEPTH,
-                1.0f,
-                0,
-                0,
-                nullptr
-            );
-
-            // Descriptor tables contain GPU descriptor handles, so their heap
-            // must be shader-visible and bound before setting root parameter 1.
+            // Switch from the Material SRV heap used by the Forward pass to the
+            // one-entry HDR SRV heap consumed by the presentation pass.
             ID3D12DescriptorHeap* const shaderVisibleDescriptorHeaps[] = {
-                materialSrvHeap.Get()
+                hdrSrvHeap.Get()
             };
 
             CommandList->SetDescriptorHeaps(
@@ -3469,38 +3928,26 @@ int main()
             );
 
             CommandList->SetGraphicsRootSignature(
-                rootSignature.Get()
+                toneMappingRootSignature.Get()
             );
 
             CommandList->SetPipelineState(
-                trianglePipelineState.Get()
+                toneMappingPipelineState.Get()
             );
 
-            // Root parameter 0 selects the Cube object slot at b0.
-            CommandList->SetGraphicsRootConstantBufferView(
-                0,
-                cubeTransformAddress
-            );
-
-            // Root parameter 1 is the four-SRV table mapped to t0-t3.
             CommandList->SetGraphicsRootDescriptorTable(
+                0,
+                hdrSrvHeap->GetGPUDescriptorHandleForHeapStart()
+            );
+
+            const ToneMappingConstants toneMappingConstants{
+                .exposure = exposure,
+                .padding = {}
+            };
+            CommandList->SetGraphicsRoot32BitConstants(
                 1,
-                materialSrvHeap->GetGPUDescriptorHandleForHeapStart()
-            );
-
-            // Root parameter 2 copies twenty 32-bit PBR values into b1.
-            CommandList->SetGraphicsRoot32BitConstants(
-                2,
-                20,
-                &pbrConstants,
-                0
-            );
-
-            // Root parameter 3 supplies light-space and PCF values at b2.
-            CommandList->SetGraphicsRoot32BitConstants(
-                3,
-                20,
-                &shadowConstants,
+                4,
+                &toneMappingConstants,
                 0
             );
 
@@ -3510,38 +3957,14 @@ int main()
 
             CommandList->IASetVertexBuffers(
                 0,
-                1,
-                &triangleVertexBufferView
+                0,
+                nullptr
             );
 
-            // The index view supplies vertex numbers; the vertex view above
-            // supplies POSITION, NORMAL, TEXCOORD, and TANGENT data for them.
-            CommandList->IASetIndexBuffer(
-                &triangleIndexBufferView
-            );
-
-            CommandList->DrawIndexedInstanced(
-                cubeIndexCount,
+            CommandList->IASetIndexBuffer(nullptr);
+            CommandList->DrawInstanced(
+                3,
                 1,
-                0,
-                0,
-                0
-            );
-
-            CommandList->SetGraphicsRootConstantBufferView(
-                0,
-                groundTransformAddress
-            );
-            CommandList->SetGraphicsRoot32BitConstants(
-                2,
-                20,
-                &groundPbrConstants,
-                0
-            );
-            CommandList->DrawIndexedInstanced(
-                groundPlaneIndexCount,
-                1,
-                groundPlaneStartIndex,
                 0,
                 0
             );

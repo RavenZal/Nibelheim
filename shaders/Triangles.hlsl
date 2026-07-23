@@ -133,20 +133,6 @@ float3 FresnelSchlick(float cosineTheta, float3 reflectanceAtNormalIncidence)
         pow(1.0f - saturate(cosineTheta), 5.0f);
 }
 
-float3 LinearToSrgb(float3 linearColor)
-{
-    const float3 nonNegativeColor = max(linearColor, 0.0f);
-    const float3 lowSegment = 12.92f * nonNegativeColor;
-    const float3 highSegment =
-        1.055f * pow(nonNegativeColor, 1.0f / 2.4f) - 0.055f;
-    const float3 useHighSegment = step(
-        float3(0.0031308f, 0.0031308f, 0.0031308f),
-        nonNegativeColor
-    );
-
-    return lerp(lowSegment, highSegment, useHighSegment);
-}
-
 float3 NormalizeOrFallback(float3 value, float3 fallback)
 {
     const float lengthSquared = dot(value, value);
@@ -201,7 +187,7 @@ float CalculateShadowVisibility(
     return visibility / 9.0f;
 }
 
-float4 PSMain(VertexShaderOutput input) : SV_Target0
+float4 EvaluateForwardPbrLinear(VertexShaderOutput input)
 {
     const float4 sampledBaseColor = baseColorTexture.Sample(
         materialSampler,
@@ -300,11 +286,13 @@ float4 PSMain(VertexShaderOutput input) : SV_Target0
     const float3 linearColor =
         ambient + shadowVisibility * directLighting;
 
-    // The current swap chain is UNORM rather than sRGB. Clamp to SDR and
-    // explicitly encode linear lighting to sRGB; HDR tone mapping comes later.
-    const float3 outputColor = LinearToSrgb(saturate(linearColor));
     return float4(
-        outputColor,
+        linearColor,
         sampledBaseColor.a * baseColorFactor.a
     );
+}
+
+float4 PSMainHdr(VertexShaderOutput input) : SV_Target0
+{
+    return EvaluateForwardPbrLinear(input);
 }
