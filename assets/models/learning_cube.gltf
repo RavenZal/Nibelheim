@@ -46,7 +46,7 @@
           "texCoord": 0
         },
         "metallicFactor": 0.7,
-        "roughnessFactor": 0.35,
+        "roughnessFactor": 0.9,
         "metallicRoughnessTexture": {
           "index": 2,
           "texCoord": 0
@@ -55,7 +55,7 @@
       "normalTexture": {
         "index": 1,
         "texCoord": 0,
-        "scale": 0.8
+        "scale": 0.35
       }
     }
   ],
@@ -79,12 +79,12 @@
       "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAmSURBVChTY3hmI/cfhCWbPoAxOp+wAlwSMD5hBbgkYHyau0HuPwDFSpkhzsAAYwAAAABJRU5ErkJggg=="
     },
     {
-      "name": "Learning Cube Normal Image",
-      "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAgSURBVChTYzib9uw/MjZGw3RRMAsogYSN0TDNFTz7DwA8KrlB8PwZpAAAAABJRU5ErkJggg=="
+      "name": "Learning Cube Smooth Normal Image",
+      "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAIfSURBVFhH7dWxiuggFEXRfLGICIKFkGJAEBG/eN7e7f2BTPGK1dx7jqRIzPO+v78/mFjYOLiBM3dmzNqxO9DRUFGQkQJn7syYtWP3eX84DBMLGwc3cObOjFk7dgc6GioKMlLgzJ0Zs3bsPu/kMEwsbBzcwJk7M2bt2B3oaKgoyEiBM3dmzNqx+7yLwzCxsHFwA2fuzJi1Y3ego6GiICMFztyZMWvH7vNuDsPEwsbBDZy5M2PWjt2BjoaKgowUOHNnxqwdu897OAwTCxsHN3DmzoxZO3YHOhoqCjJS4MydGbN27D7v5TBMLGwc3MCZOzNm7dgd6GioKMhIgTN3Zszasfv/Af7AA/AifPsS8il8+xlyGXx7EXEdfnsV80P49mfEL/Hb3/HgMEwsbBzcwJk7M2bt2B3oaKgoyEiBM3dmzNqx+7ydwzCxsHFwA2fuzJi1Y3ego6GiICMFztyZMWvH7vM2DsPEwsbBDZy5M2PWjt2BjoaKgowUOHNnxqwdu89bOQwTCxsHN3DmzoxZO3YHOhoqCjJS4MydGbN27D5v4TBMLGwc3MCZOzNm7dgd6GioKMhIgTN3Zszasfu8mcMwsbBxcANn7syYtWN3oKOhoiAjBc7cmTFrx+7zJg7DxMLGwQ2cuTNj1o7dgY6GioKMFDhzZ8asHbv/H+APPAAvwrcvIZ/Ct58hl8G3FxHX4bdXMT+Eb39G/BK/+x3//v4DIOL0phmtpQwAAAAASUVORK5CYII="
     },
     {
-      "name": "Learning Cube Metallic-Roughness Image",
-      "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABJSURBVChTVckxFYAwAAPRSKkPhOCjPvCBkPpgq430Jl4y/OVOHsNtF/kiFkaQb2JhBHkSCyPID7EwgvwSCyPIi1gYQf6IhfHbPrK7wCEGtcbbAAAAAElFTkSuQmCC"
+      "name": "Learning Cube Smooth Metallic-Roughness Image",
+      "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAMTSURBVFhH1ZXbcptAEAXzK7lf/O2WQAgRAQLhH1O6R7sRqFRJnozzcKpcZuZMa3d25t3l59Plph/o+1XHb+gr+oI+879P6CP6kPT+pkbxvxAxDbENOQ25DR4NXg2eIWo01FLUvAEcFR9bgkIkdSR3mLSYtZi2mB8pohbF0YH/qZqYmtianJrcGo8arxpPdaDGIQGgK4DFW9TxsSOoVyT1JPeY9Jj1mHaYdxRphZgBHFBtcbQnpiK2Iqcit8KjwqvCcy8ENWpqJYgbQId6Pp4IUgNJA8kDJgNmJ0xPmPcUEeIRQKWI2RFbklOSW+JR4rXDU4jqEUD8enTi40DQqEgaSR4xGTEbMR0wPyWAdgZQo30C2BFTEluQU5Bb4FHgVeIZENTYU0uIBUCfACx+ViRNJE+YnDE7YzomAE/hHiCKo5KYgtgtOVtyt3hs8SrwDAhqVHOAfP8CDDOAaQYwzQCGGYDXMAcoUUHMltgNORtyN3hs8NriGRCPAOL+ZwBTAngh+SUBTHcA3T8APJP7/F8ArHoFqzfhm3iGqw+i3AerjeIMsdoy+i0+rrKO8z/iYw40yWRNNNNU81xoBhASSglJrNAB74/AK/+w+JHX4leAXNxj8XjyUcWxeXweo8fpsWKejzoffQbIV+M1xXWR4/V5jV5nvlqv2eteAFjcxrBBbJToVpKigTCJhsLUBsvNZuNlABvSxrRBbVQbNhqX3GhkvGxsG9xGt+ETxBLAJ2Jxn4xPJ54QJj4pn5ZPzKf2CMDiPlGfqk/WpxtPGA+fdH7ePnWf/ALA4g4HAaI4cnjEEMHEoeJwccgI4NBx+GQAh5IADimHlUMrhhe5Mczwcrg55Bx2AngKCwDHo2MyiiPHZ4xRTByrjlfHrOM2TuEOIH49clw7th3fsUfwcKw73oUQwLH/EMBFEcWRCyQWCSYuFheMi8aFMweI+08ALqoMEBs0AbjYMoALLwNwDX8GcJW6Uv8G4GqeA7i6BXCVu9Jjs94BpD544wCvfgWrNuGqz3D1QbT6KM4Qqywj/8gQr76Ony6/ANK7cC62+TyuAAAAAElFTkSuQmCC"
     }
   ],
   "buffers": [

@@ -25,7 +25,7 @@ cbuffer PbrConstants : register(b1)
     float directionalLightIntensity;
     float ambientIntensity;
     float modelHandedness;
-    float pbrPadding;
+    uint useMaterialTextures;
 };
 
 cbuffer ShadowConstants : register(b2)
@@ -189,18 +189,35 @@ float CalculateShadowVisibility(
 
 float4 EvaluateForwardPbrLinear(VertexShaderOutput input)
 {
-    const float4 sampledBaseColor = baseColorTexture.Sample(
-        materialSampler,
-        input.textureCoordinates
-    );
-    const float3 baseColor =
-        sampledBaseColor.rgb * baseColorFactor.rgb;
+    float4 sampledBaseColor = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    float4 sampledMetallicRoughness =
+        float4(1.0f, 1.0f, 1.0f, 1.0f);
+    float3 tangentNormal = float3(0.0f, 0.0f, 1.0f);
 
-    const float4 sampledMetallicRoughness =
-        metallicRoughnessTexture.Sample(
+    // The imported Cube consumes all glTF textures. The controlled Ground
+    // receiver uses constant material values so repeating the Cube's normal
+    // and metallic-roughness patterns cannot masquerade as striped shadows.
+    if (useMaterialTextures != 0)
+    {
+        sampledBaseColor = baseColorTexture.Sample(
             materialSampler,
             input.textureCoordinates
         );
+        sampledMetallicRoughness = metallicRoughnessTexture.Sample(
+            materialSampler,
+            input.textureCoordinates
+        );
+        tangentNormal = normalTexture.Sample(
+            materialSampler,
+            input.textureCoordinates
+        ).xyz * 2.0f - 1.0f;
+        tangentNormal.xy *= normalScale;
+        tangentNormal = normalize(tangentNormal);
+    }
+
+    const float3 baseColor =
+        sampledBaseColor.rgb * baseColorFactor.rgb;
+
     const float metallic = saturate(
         sampledMetallicRoughness.b * metallicFactor
     );
@@ -209,13 +226,6 @@ float4 EvaluateForwardPbrLinear(VertexShaderOutput input)
         0.045f,
         1.0f
     );
-
-    float3 tangentNormal = normalTexture.Sample(
-        materialSampler,
-        input.textureCoordinates
-    ).xyz * 2.0f - 1.0f;
-    tangentNormal.xy *= normalScale;
-    tangentNormal = normalize(tangentNormal);
 
     const float3 geometricNormal = normalize(input.worldNormal);
     float3 tangent = input.worldTangent.xyz -

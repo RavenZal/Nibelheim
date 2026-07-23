@@ -60,7 +60,7 @@ struct PbrConstants final
     float directionalLightIntensity = 1.0F;
     float ambientIntensity = 0.03F;
     float modelHandedness = 1.0F;
-    float padding = 0.0F;
+    std::uint32_t useMaterialTextures = 1;
 };
 
 static_assert(
@@ -3570,11 +3570,26 @@ int main()
                 .directionalLightIntensity = directionalLightIntensity,
                 .ambientIntensity = ambientIntensity,
                 .modelHandedness = modelHandedness,
-                .padding = 0.0F
+                .useMaterialTextures = 1
             };
 
             PbrConstants groundPbrConstants = pbrConstants;
+            // The controlled shadow receiver is not part of the glTF asset and
+            // must not inherit the Cube's strongly varying normal and
+            // metallic-roughness maps. A neutral dielectric material keeps a
+            // constant receiver response, so visible variation comes from the
+            // Shadow Map instead of repeated Cube texture data.
+            groundPbrConstants.baseColorFactor = {
+                0.45F,
+                0.45F,
+                0.45F,
+                1.0F
+            };
+            groundPbrConstants.metallicFactor = 0.0F;
+            groundPbrConstants.roughnessFactor = 0.8F;
+            groundPbrConstants.normalScale = 0.0F;
             groundPbrConstants.modelHandedness = 1.0F;
+            groundPbrConstants.useMaterialTextures = 0;
 
             std::memcpy(
                 mappedTransformConstantData[
